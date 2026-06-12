@@ -1,0 +1,102 @@
+using System.CommandLine;
+using AiMemory.Commands;
+
+var root = new RootCommand("AI Memory Tool - local engineering memory with Ollama + PostgreSQL/pgvector");
+
+var dbOption = new Option<string?>("--db", "PostgreSQL database name or connection string override");
+var ollamaOption = new Option<string?>("--ollama", "Ollama base URL override");
+var modelOption = new Option<string?>("--model", "Ollama embedding model override");
+var workspaceOption = new Option<string?>("--workspace", "Workspace name override");
+
+var index = new Command("index", "Index configured projects or a specific project");
+var projectArg = new Argument<string?>("project", () => null, "Optional project name from configuration");
+index.AddArgument(projectArg);
+index.AddOption(dbOption);
+index.AddOption(ollamaOption);
+index.AddOption(modelOption);
+index.AddOption(workspaceOption);
+index.SetHandler(async (project, workspace, db, ollama, model) => await IndexCommand.RunAsync(project, workspace, db, ollama, model), projectArg, workspaceOption, dbOption, ollamaOption, modelOption);
+
+var search = new Command("search", "Search engineering memory");
+var queryArg = new Argument<string>("query", "Search query");
+var limitOption = new Option<int>("--limit", () => 10, "Max results");
+search.AddArgument(queryArg);
+search.AddOption(limitOption);
+search.AddOption(dbOption);
+search.AddOption(ollamaOption);
+search.AddOption(modelOption);
+search.SetHandler(async (query, limit, db, ollama, model) => await SearchCommand.RunAsync(query, limit, db, ollama, model), queryArg, limitOption, dbOption, ollamaOption, modelOption);
+
+var watch = new Command("watch", "Watch configured projects and reindex changed files");
+watch.AddOption(dbOption);
+watch.AddOption(ollamaOption);
+watch.AddOption(modelOption);
+watch.SetHandler(async (db, ollama, model) => await WatchCommand.RunAsync(db, ollama, model), dbOption, ollamaOption, modelOption);
+
+var doctor = new Command("doctor", "Validate local environment and configuration");
+doctor.SetHandler(async () => await DoctorCommand.RunAsync());
+
+var setup = new Command("setup", "Interactive first-time configuration wizard");
+setup.SetHandler(async () => await SetupCommand.RunAsync());
+
+var project = new Command("project", "Manage configured projects");
+
+var projectAdd = new Command("add", "Add a project to configuration");
+projectAdd.AddOption(workspaceOption);
+projectAdd.SetHandler(async (workspace) => await ProjectCommand.AddAsync(workspace), workspaceOption);
+
+var projectList = new Command("list", "List configured projects");
+projectList.AddOption(workspaceOption);
+projectList.SetHandler(async (workspace) => await ProjectCommand.ListAsync(workspace), workspaceOption);
+
+var projectRemove = new Command("remove", "Remove a configured project");
+var projectNameArg = new Argument<string>("name", "Project name");
+projectRemove.AddArgument(projectNameArg);
+projectRemove.AddOption(workspaceOption);
+projectRemove.SetHandler(async (name, workspace) => await ProjectCommand.RemoveAsync(name, workspace), projectNameArg, workspaceOption);
+
+project.AddCommand(projectAdd);
+project.AddCommand(projectList);
+project.AddCommand(projectRemove);
+
+var workspace = new Command("workspace", "Manage workspaces");
+
+var workspaceAdd = new Command("add", "Create a workspace and make it active");
+var workspaceNameArg = new Argument<string>("name", "Workspace name");
+workspaceAdd.AddArgument(workspaceNameArg);
+workspaceAdd.SetHandler(async (name) => await WorkspaceCommand.AddAsync(name), workspaceNameArg);
+
+var workspaceList = new Command("list", "List workspaces");
+workspaceList.SetHandler(async () => await WorkspaceCommand.ListAsync());
+
+var workspaceUse = new Command("use", "Select the active workspace");
+var workspaceUseNameArg = new Argument<string>("name", "Workspace name");
+workspaceUse.AddArgument(workspaceUseNameArg);
+workspaceUse.SetHandler(async (name) => await WorkspaceCommand.UseAsync(name), workspaceUseNameArg);
+
+var workspaceRemove = new Command("remove", "Remove a workspace");
+var workspaceRemoveNameArg = new Argument<string>("name", "Workspace name");
+workspaceRemove.AddArgument(workspaceRemoveNameArg);
+workspaceRemove.SetHandler(async (name) => await WorkspaceCommand.RemoveAsync(name), workspaceRemoveNameArg);
+
+workspace.AddCommand(workspaceAdd);
+workspace.AddCommand(workspaceList);
+workspace.AddCommand(workspaceUse);
+workspace.AddCommand(workspaceRemove);
+
+var mcp = new Command("mcp", "Start MCP server over stdio");
+mcp.AddOption(dbOption);
+mcp.AddOption(ollamaOption);
+mcp.AddOption(modelOption);
+mcp.SetHandler(async (db, ollama, model) => await McpCommand.RunAsync(db, ollama, model), dbOption, ollamaOption, modelOption);
+
+root.AddCommand(index);
+root.AddCommand(search);
+root.AddCommand(watch);
+root.AddCommand(doctor);
+root.AddCommand(setup);
+root.AddCommand(workspace);
+root.AddCommand(project);
+root.AddCommand(mcp);
+
+return await root.InvokeAsync(args);

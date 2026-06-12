@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ai-memory</ToolCommandName>
+    <PackageId>AiMemory.Tool</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Engineering Team</Authors>
+    <Description>Local AI engineering memory using Ollama, PostgreSQL and pgvector.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="9.0.3" />
+    <PackageReference Include="Pgvector" Version="0.3.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.0" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="sql/001_create_schema.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
