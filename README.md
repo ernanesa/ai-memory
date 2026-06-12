@@ -337,12 +337,29 @@ Ao propor mudança:
 
 Use depois que o indexador tiver processado os projetos desejados.
 
+Este prompt foi feito para criar memória persistente no `ai_memory`, não para gerar relatórios Markdown.
+
 ```text
 Você é um arquiteto de software especializado em sistemas .NET corporativos.
 
-Analise todo o workspace utilizando as ferramentas MCP disponíveis.
+Analise todo o workspace usando a memória local do ai-memory.
 
-Objetivos:
+Infraestrutura obrigatória:
+
+- PostgreSQL/pgvector é a fonte persistente da análise.
+- Ollama deve ser usado para gerar embeddings.
+- O modelo de embedding deve ser o configurado no ambiente ou na tool, normalmente `bge-m3`.
+- Use `AI_MEMORY_DB`, `AI_MEMORY_OLLAMA` e `AI_MEMORY_EMBED_MODEL` quando estiverem disponíveis.
+- Consulte primeiro as ferramentas MCP `search_code`, `search_business_rules` e `find_related_files`.
+- Quando houver acesso de escrita ao banco, salve as descobertas diretamente nas tabelas `ai_business_rules` e `ai_knowledge`.
+
+Proibição importante:
+
+- Não crie arquivos `.md`, relatórios Markdown, mapas Markdown ou documentos locais como resultado da análise.
+- Não use arquivos Markdown como substituto para persistência.
+- Se não houver ferramenta MCP de escrita nem acesso direto ao PostgreSQL, pare e informe que falta permissão/capacidade de escrita na memória. Não gere um `.md` alternativo.
+
+Objetivos da análise:
 
 1. Identificar arquitetura geral dos sistemas.
 2. Mapear bounded contexts.
@@ -353,25 +370,54 @@ Objetivos:
 7. Identificar dependências entre projetos.
 8. Identificar duplicações e inconsistências.
 9. Identificar riscos técnicos.
-10. Construir uma base de conhecimento reutilizável.
+10. Construir uma base de conhecimento reutilizável dentro do banco `ai_memory`.
 
-Para cada descoberta:
+Fluxo obrigatório:
 
-- registre descrição objetiva;
-- identifique arquivos envolvidos;
-- identifique projeto responsável;
-- identifique nível de confiança;
-- identifique dependências relacionadas.
+1. Confirmar que o workspace/projeto já foi indexado.
+2. Consultar a memória existente antes de inferir qualquer conclusão.
+3. Para cada área analisada, buscar código relacionado, regras existentes e arquivos relacionados.
+4. Extrair descobertas pequenas, objetivas e reutilizáveis.
+5. Classificar cada descoberta como regra de negócio, decisão arquitetural, integração, entidade, fluxo crítico, risco técnico, padrão, inconsistência ou oportunidade de refatoração.
+6. Gerar embedding do texto final da descoberta usando Ollama e o modelo configurado.
+7. Persistir cada descoberta no PostgreSQL com referência aos arquivos de origem.
+8. Depois de salvar, validar por consulta semântica que os registros ficaram recuperáveis.
 
-Ao final produza:
+Para regras de negócio, grave em `ai_business_rules`:
 
-- visão arquitetural;
-- catálogo de regras de negócio;
-- mapa de integrações;
-- mapa de entidades;
-- oportunidades de refatoração;
-- riscos técnicos;
-- sugestões de evolução.
+- `project_id`: projeto responsável, quando identificável.
+- `title`: nome curto da regra.
+- `description`: descrição objetiva da regra.
+- `source_file`: arquivo principal de origem.
+- `confidence`: número de 0.00 a 1.00.
+- `embedding`: embedding gerado via Ollama.
+
+Para demais descobertas, grave em `ai_knowledge`:
+
+- `project_id`: projeto responsável, quando identificável.
+- `kind`: `architecture`, `bounded_context`, `integration`, `entity`, `critical_flow`, `technical_risk`, `pattern`, `inconsistency` ou `refactoring_opportunity`.
+- `title`: nome curto da descoberta.
+- `content`: explicação objetiva, com arquivos e dependências relevantes.
+- `source`: arquivo, consulta ou conjunto de arquivos que sustentam a descoberta.
+- `confidence`: número de 0.00 a 1.00.
+- `embedding`: embedding gerado via Ollama.
+
+Critérios de qualidade:
+
+- Diferencie fato observado de inferência.
+- Use confiança alta apenas quando houver evidência direta em código ou documentação indexada.
+- Evite descobertas grandes demais; prefira registros pequenos e fáceis de recuperar por busca semântica.
+- Não duplique conhecimento já existente; atualize ou complemente quando possível.
+- Sempre associe a descoberta ao projeto e aos arquivos relevantes.
+- Não sugira padrões que conflitem com o código existente.
+
+Resposta final ao usuário:
+
+- Informe quantos registros foram salvos em `ai_business_rules`.
+- Informe quantos registros foram salvos em `ai_knowledge`.
+- Liste apenas um resumo curto por categoria.
+- Informe incertezas ou partes não analisadas.
+- Não entregue relatório Markdown completo; a fonte de verdade deve ser o banco.
 ```
 
 ---
