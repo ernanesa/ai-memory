@@ -1,15 +1,22 @@
 using AiMemory.Models;
 using Npgsql;
 using Pgvector;
+using Pgvector.Npgsql;
 
 namespace AiMemory.Services;
 
-public sealed class PgVectorService(string connectionString)
+public sealed class PgVectorService : IAsyncDisposable
 {
+    private readonly NpgsqlDataSource _dataSource;
+
+    public PgVectorService(string connectionString)
+    {
+        _dataSource = CreateDataSource(connectionString);
+    }
+
     public async Task UpsertChunkAsync(CodeChunk chunk, float[] embedding, CancellationToken ct = default)
     {
-        await using var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
         WITH project AS (
@@ -38,8 +45,7 @@ public sealed class PgVectorService(string connectionString)
 
     public async Task<IReadOnlyList<(string Project, string File, string? Symbol, string Content, double Distance)>> SearchAsync(float[] embedding, int limit, CancellationToken ct = default)
     {
-        await using var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
         SELECT p.name, c.file_path, c.symbol_name, c.content, c.embedding <=> $1 AS distance
@@ -55,5 +61,14 @@ public sealed class PgVectorService(string connectionString)
         while (await reader.ReadAsync(ct))
             rows.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDouble(4)));
         return rows;
+    }
+
+    public ValueTask DisposeAsync() => _dataSource.DisposeAsync();
+
+    private static NpgsqlDataSource CreateDataSource(string connectionString)
+    {
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        builder.UseVector();
+        return builder.Build();
     }
 }

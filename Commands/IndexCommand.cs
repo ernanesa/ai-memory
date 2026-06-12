@@ -33,7 +33,7 @@ public static class IndexCommand
         var ollamaService = new OllamaService(
             ConfigService.ResolveOllamaBaseUrl(config, ollama),
             ConfigService.ResolveEmbeddingModel(config, model));
-        var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
+        await using var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
 
         foreach (var configuredProject in projects)
         {
@@ -50,8 +50,19 @@ public static class IndexCommand
             {
                 foreach (var chunk in chunker.ChunkFile(projectName, root, file))
                 {
-                    var embedding = await ollamaService.EmbedAsync(chunk.Content);
-                    await pg.UpsertChunkAsync(chunk, embedding);
+                    try
+                    {
+                        var embedding = await ollamaService.EmbedAsync(chunk.Content);
+                        await pg.UpsertChunkAsync(chunk, embedding);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed to index chunk from {chunk.FilePath}" +
+                            $"{(chunk.SymbolName is null ? "" : $" ({chunk.SymbolName})")} " +
+                            $"with length {chunk.Content.Length}.",
+                            ex);
+                    }
                 }
                 Console.WriteLine($"  indexed {Path.GetRelativePath(root, file)}");
             }

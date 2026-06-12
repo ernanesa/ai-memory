@@ -13,7 +13,13 @@ public sealed class OllamaService(string baseUrl, string model)
     public async Task<float[]> EmbedAsync(string text, CancellationToken ct = default)
     {
         var response = await _http.PostAsJsonAsync("api/embeddings", new { model, prompt = text }, ct);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            throw new HttpRequestException(
+                $"Ollama embedding request failed with {(int)response.StatusCode} {response.ReasonPhrase} " +
+                $"for model '{model}' and input length {text.Length}. Response: {body}");
+        }
         var payload = await response.Content.ReadFromJsonAsync<EmbeddingResponse>(cancellationToken: ct);
         return payload?.Embedding ?? throw new InvalidOperationException("Ollama did not return an embedding.");
     }

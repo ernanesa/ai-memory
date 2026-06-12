@@ -5,6 +5,8 @@ namespace AiMemory.Services;
 
 public sealed class ChunkingService
 {
+    private const int MaxChunkLength = 1_000;
+
     private static readonly HashSet<string> IgnoredDirs = new(StringComparer.OrdinalIgnoreCase)
     { ".git", "bin", "obj", "node_modules", "dist", "coverage", "packages", ".idea", ".vs" };
 
@@ -43,7 +45,8 @@ public sealed class ChunkingService
         {
             var normalized = content.Trim();
             if (normalized.Length < 40) continue;
-            yield return new CodeChunk(projectName, root, relative, language, type, symbol, normalized, HashService.Sha256(normalized));
+            foreach (var part in SplitChunk(normalized))
+                yield return new CodeChunk(projectName, root, relative, language, type, symbol, part, HashService.Sha256(part));
         }
     }
 
@@ -101,8 +104,26 @@ public sealed class ChunkingService
 
     private static IEnumerable<(string Type, string? Symbol, string Content)> ChunkBySize(string text, string type, string? symbol)
     {
-        const int max = 6_000;
-        for (var i = 0; i < text.Length; i += max)
-            yield return (type, symbol, text.Substring(i, Math.Min(max, text.Length - i)));
+        foreach (var part in SplitChunk(text))
+            yield return (type, symbol, part);
+    }
+
+    private static IEnumerable<string> SplitChunk(string text)
+    {
+        var start = 0;
+        while (start < text.Length)
+        {
+            var length = Math.Min(MaxChunkLength, text.Length - start);
+            if (start + length < text.Length)
+            {
+                var newline = text.LastIndexOf('\n', start + length - 1, length);
+                if (newline > start + 200)
+                    length = newline - start + 1;
+            }
+
+            var part = text.Substring(start, length).Trim();
+            if (part.Length >= 40) yield return part;
+            start += length;
+        }
     }
 }

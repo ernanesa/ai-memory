@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>ai-memory</ToolCommandName>
     <PackageId>AiMemory.Tool</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>Engineering Team</Authors>
     <Description>Local AI engineering memory using Ollama, PostgreSQL and pgvector.</Description>
   </PropertyGroup>

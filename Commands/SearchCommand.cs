@@ -11,7 +11,8 @@ public static class SearchCommand
         var embedding = await new OllamaService(
             ConfigService.ResolveOllamaBaseUrl(config, ollama),
             ConfigService.ResolveEmbeddingModel(config, model)).EmbedAsync(query);
-        var results = await new PgVectorService(ConfigService.ResolveConnectionString(config, db)).SearchAsync(embedding, limit);
+        await using var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
+        var results = await pg.SearchAsync(embedding, limit);
         foreach (var r in results)
         {
             Console.WriteLine($"[{r.Distance:0.0000}] {r.Project}/{r.File} {(r.Symbol is null ? "" : ":: " + r.Symbol)}");
