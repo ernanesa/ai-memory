@@ -237,6 +237,12 @@ ai-memory watch
 ai-memory mcp
 ```
 
+O comando `ai-memory mcp` inicia o servidor MCP via STDIO. Ele já expõe ferramentas para agentes consultarem a memória local indexada:
+
+- `search_code`: busca semântica em código, documentação e arquivos de configuração;
+- `search_business_rules`: busca semântica em regras de negócio extraídas;
+- `find_related_files`: encontra arquivos relacionados a uma consulta ou a outro arquivo indexado.
+
 Variáveis opcionais:
 
 ```bash
@@ -329,7 +335,7 @@ Ao propor mudança:
 
 ## 9. Prompt completo para análise do projeto inteiro
 
-Use depois que o indexador e MCP estiverem funcionando.
+Use depois que o indexador tiver processado os projetos desejados.
 
 ```text
 Você é um arquiteto de software especializado em sistemas .NET corporativos.
@@ -378,18 +384,19 @@ Ao final produza:
 - indexação básica;
 - busca vetorial básica;
 - chunking inicial;
-- comandos `index` e `search`.
+- comandos `index`, `search`, `watch` e `mcp`;
+- servidor MCP STDIO funcional;
+- ferramentas MCP `search_code`, `search_business_rules` e `find_related_files`.
 
 ### Próximas melhorias
 
 1. Implementar watcher real com debounce.
-2. Implementar MCP server real.
-3. Trocar chunking C# por Roslyn.
-4. Criar extração automática de regras de negócio.
-5. Criar tabela de relações entre símbolos.
-6. Criar reranking.
-7. Criar dashboard simples de memória.
-8. Criar comandos para limpeza e reindexação por projeto.
+2. Trocar chunking C# por Roslyn.
+3. Criar extração automática de regras de negócio.
+4. Criar tabela de relações entre símbolos.
+5. Criar reranking.
+6. Criar dashboard simples de memória.
+7. Criar comandos para limpeza e reindexação por projeto.
 
 ---
 
