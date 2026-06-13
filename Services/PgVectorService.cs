@@ -14,23 +14,36 @@ public sealed class PgVectorService : IAsyncDisposable
         _dataSource = CreateDataSource(connectionString);
     }
 
-    public async Task UpsertChunkAsync(CodeChunk chunk, float[] embedding, CancellationToken ct = default)
+    public async Task UpsertChunkAsync(string workspaceName, CodeChunk chunk, float[] embedding, CancellationToken ct = default)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-        WITH project AS (
-            INSERT INTO ai_projects(name, root_path)
-            VALUES ($1, $2)
-            ON CONFLICT(name) DO UPDATE SET root_path = EXCLUDED.root_path
+        WITH workspace AS (
+            INSERT INTO ai_workspaces(name)
+            VALUES ($1)
+            ON CONFLICT(name) DO UPDATE SET name = EXCLUDED.name
             RETURNING id
+        ),
+        project AS (
+            INSERT INTO ai_projects(name, root_path)
+            VALUES ($2, $3)
+            ON CONFLICT(root_path) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id
+        ),
+        workspace_project AS (
+            INSERT INTO ai_workspace_projects(workspace_id, project_id)
+            SELECT workspace.id, project.id
+            FROM workspace, project
+            ON CONFLICT(workspace_id, project_id) DO NOTHING
         )
         INSERT INTO ai_chunks(project_id, file_path, language, chunk_type, symbol_name, content, content_hash, embedding, updated_at)
-        SELECT id, $3, $4, $5, $6, $7, $8, $9, NOW()
+        SELECT id, $4, $5, $6, $7, $8, $9, $10, NOW()
         FROM project
         ON CONFLICT(project_id, file_path, content_hash)
         DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding, updated_at = NOW();
         """;
+        cmd.Parameters.AddWithValue(workspaceName);
         cmd.Parameters.AddWithValue(chunk.ProjectName);
         cmd.Parameters.AddWithValue(chunk.RootPath);
         cmd.Parameters.AddWithValue(chunk.FilePath);
@@ -72,7 +85,17 @@ public sealed class PgVectorService : IAsyncDisposable
         FROM ai_chunks c
         JOIN ai_projects p ON p.id = c.project_id
         WHERE c.embedding IS NOT NULL
-          AND ($3::text IS NULL OR p.name = $3 OR p.name ILIKE '%/' || $3)
+          AND (
+              $3::text IS NULL
+              OR p.name = $3
+              OR EXISTS (
+                  SELECT 1
+                  FROM ai_workspace_projects wp
+                  JOIN ai_workspaces w ON w.id = wp.workspace_id
+                  WHERE wp.project_id = p.id
+                    AND (w.name = $3 OR w.name || '/' || p.name = $3)
+              )
+          )
         ORDER BY c.embedding <=> $1
         LIMIT $2;
         """;
@@ -106,7 +129,17 @@ public sealed class PgVectorService : IAsyncDisposable
         FROM ai_business_rules r
         LEFT JOIN ai_projects p ON p.id = r.project_id
         WHERE r.embedding IS NOT NULL
-          AND ($3::text IS NULL OR p.name = $3 OR p.name ILIKE '%/' || $3)
+          AND (
+              $3::text IS NULL
+              OR p.name = $3
+              OR EXISTS (
+                  SELECT 1
+                  FROM ai_workspace_projects wp
+                  JOIN ai_workspaces w ON w.id = wp.workspace_id
+                  WHERE wp.project_id = p.id
+                    AND (w.name = $3 OR w.name || '/' || p.name = $3)
+              )
+          )
         ORDER BY r.embedding <=> $1
         LIMIT $2;
         """;
@@ -138,7 +171,17 @@ public sealed class PgVectorService : IAsyncDisposable
         SELECT p.name, c.file_path, c.content
         FROM ai_chunks c
         JOIN ai_projects p ON p.id = c.project_id
-        WHERE ($2::text IS NULL OR p.name = $2 OR p.name ILIKE '%/' || $2)
+        WHERE (
+              $2::text IS NULL
+              OR p.name = $2
+              OR EXISTS (
+                  SELECT 1
+                  FROM ai_workspace_projects wp
+                  JOIN ai_workspaces w ON w.id = wp.workspace_id
+                  WHERE wp.project_id = p.id
+                    AND (w.name = $2 OR w.name || '/' || p.name = $2)
+              )
+          )
           AND (c.file_path = $1 OR c.file_path ILIKE '%' || $1)
         ORDER BY length(c.content) DESC;
         """;
@@ -176,7 +219,17 @@ public sealed class PgVectorService : IAsyncDisposable
         FROM ai_chunks c
         JOIN ai_projects p ON p.id = c.project_id
         WHERE c.embedding IS NOT NULL
-          AND ($3::text IS NULL OR p.name = $3 OR p.name ILIKE '%/' || $3)
+          AND (
+              $3::text IS NULL
+              OR p.name = $3
+              OR EXISTS (
+                  SELECT 1
+                  FROM ai_workspace_projects wp
+                  JOIN ai_workspaces w ON w.id = wp.workspace_id
+                  WHERE wp.project_id = p.id
+                    AND (w.name = $3 OR w.name || '/' || p.name = $3)
+              )
+          )
           AND ($4::text IS NULL OR (c.file_path <> $4 AND c.file_path NOT ILIKE '%' || $4))
         GROUP BY p.name, c.file_path
         ORDER BY min(c.embedding <=> $1)

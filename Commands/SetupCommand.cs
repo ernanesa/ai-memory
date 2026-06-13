@@ -323,31 +323,47 @@ public static class SetupCommand
             return SetupStepResult.Warning("Apply schema", message);
         }
 
-        var schemaPath = Path.Combine(AppContext.BaseDirectory, "sql", "001_create_schema.sql");
-        if (!File.Exists(schemaPath))
+        var schemaDirectory = Path.Combine(AppContext.BaseDirectory, "sql");
+        if (!Directory.Exists(schemaDirectory))
         {
-            var message = $"Schema file not found: {schemaPath}";
-            WriteWarning(message);
-            return SetupStepResult.Warning("Apply schema", message);
+            var schemaDirectoryMessage = $"Schema directory not found: {schemaDirectory}";
+            WriteWarning(schemaDirectoryMessage);
+            return SetupStepResult.Warning("Apply schema", schemaDirectoryMessage);
         }
 
         try
         {
-            var schema = await File.ReadAllTextAsync(schemaPath);
+            var schemaFiles = Directory.GetFiles(schemaDirectory, "*.sql")
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (schemaFiles.Length == 0)
+            {
+                var noSchemaFilesMessage = $"No schema files found in {schemaDirectory}";
+                WriteWarning(noSchemaFilesMessage);
+                return SetupStepResult.Warning("Apply schema", noSchemaFilesMessage);
+            }
+
             await using var conn = new NpgsqlConnection(connectionString);
             await conn.OpenAsync();
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = schema;
-            await cmd.ExecuteNonQueryAsync();
-            const string message = "Database schema applied";
-            WriteSuccess(message);
-            return SetupStepResult.Success("Apply schema", message);
+
+            foreach (var schemaFile in schemaFiles)
+            {
+                var schema = await File.ReadAllTextAsync(schemaFile);
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = schema;
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            var schemaAppliedMessage = $"Database schema applied ({schemaFiles.Length} file(s))";
+            WriteSuccess(schemaAppliedMessage);
+            return SetupStepResult.Success("Apply schema", schemaAppliedMessage);
         }
         catch (Exception ex)
         {
-            var message = $"Failed to apply schema: {ex.Message}";
-            WriteWarning(message);
-            return SetupStepResult.Warning("Apply schema", message);
+            var schemaErrorMessage = $"Failed to apply schema: {ex.Message}";
+            WriteWarning(schemaErrorMessage);
+            return SetupStepResult.Warning("Apply schema", schemaErrorMessage);
         }
     }
 

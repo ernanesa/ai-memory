@@ -44,16 +44,15 @@ public static class IndexCommand
                 continue;
             }
 
-            var projectName = $"{workspace.Name}/{configuredProject.Name}";
-            Console.WriteLine($"Indexing {projectName}: {root}");
+            Console.WriteLine($"Indexing {workspace.Name}/{configuredProject.Name}: {root}");
             foreach (var file in chunker.EnumerateFiles(root))
             {
-                foreach (var chunk in chunker.ChunkFile(projectName, root, file))
+                foreach (var chunk in chunker.ChunkFile(configuredProject.Name, root, file))
                 {
                     try
                     {
                         var embedding = await ollamaService.EmbedAsync(chunk.Content);
-                        await pg.UpsertChunkAsync(chunk, embedding);
+                        await pg.UpsertChunkAsync(workspace.Name, chunk, embedding);
                     }
                     catch (Exception ex)
                     {

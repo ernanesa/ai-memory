@@ -88,11 +88,28 @@ Se Homebrew não estiver instalado ou algum serviço não puder ser iniciado aut
 
 ## 3. Para que servem as tabelas
 
+### `ai_workspaces`
+
+Guarda grupos de projetos.
+
+Um workspace representa um recorte de trabalho, cliente, produto ou contexto que pode conter vários projetos.
+
 ### `ai_projects`
 
 Guarda os projetos indexados.
 
-Evita misturar os 12+ projetos em uma única massa sem contexto.
+O projeto é identificado principalmente pelo `root_path`, permitindo que o mesmo projeto participe de mais de um workspace.
+
+### `ai_workspace_projects`
+
+Guarda o vínculo entre workspaces e projetos.
+
+Permite a relação muitos-para-muitos:
+
+- um workspace pode ter vários projetos;
+- um projeto pode aparecer em vários workspaces.
+
+Isso evita misturar os 12+ projetos em uma única massa sem contexto, sem duplicar o mesmo projeto quando ele for reutilizado por mais de um workspace.
 
 ### `ai_chunks`
 

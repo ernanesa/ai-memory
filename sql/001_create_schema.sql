@@ -1,15 +1,32 @@
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS ai_workspaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS ai_projects (
-    id BIGSERIAL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
     root_path TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS ai_projects_root_path_key
+ON ai_projects(root_path);
+
+CREATE TABLE IF NOT EXISTS ai_workspace_projects (
+    workspace_id UUID NOT NULL REFERENCES ai_workspaces(id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ai_projects(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (workspace_id, project_id)
+);
+
 CREATE TABLE IF NOT EXISTS ai_chunks (
-    id BIGSERIAL PRIMARY KEY,
-    project_id BIGINT NOT NULL REFERENCES ai_projects(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES ai_projects(id),
     file_path TEXT NOT NULL,
     language TEXT,
     chunk_type TEXT,
@@ -23,8 +40,8 @@ CREATE TABLE IF NOT EXISTS ai_chunks (
 );
 
 CREATE TABLE IF NOT EXISTS ai_business_rules (
-    id BIGSERIAL PRIMARY KEY,
-    project_id BIGINT REFERENCES ai_projects(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID REFERENCES ai_projects(id),
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     source_file TEXT,
@@ -34,8 +51,8 @@ CREATE TABLE IF NOT EXISTS ai_business_rules (
 );
 
 CREATE TABLE IF NOT EXISTS ai_knowledge (
-    id BIGSERIAL PRIMARY KEY,
-    project_id BIGINT REFERENCES ai_projects(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID REFERENCES ai_projects(id),
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
     content TEXT NOT NULL,

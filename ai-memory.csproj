@@ -21,6 +21,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="sql/001_create_schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="sql/*.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
