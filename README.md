@@ -251,8 +251,22 @@ ai-memory index --workspace claps
 ai-memory index gestor --workspace claps
 ai-memory search "onde valida limite de crédito?"
 ai-memory watch
+ai-memory dashboard
+ai-memory dashboard serve
 ai-memory mcp
 ```
+
+O dashboard possui dois modos:
+
+```bash
+ai-memory dashboard
+ai-memory dashboard --workspace claps
+ai-memory dashboard --project clapsapi
+ai-memory dashboard serve
+ai-memory dashboard serve --port 5050
+```
+
+O comando `dashboard` mostra um resumo no terminal. O comando `dashboard serve` inicia uma interface web local, por padrão em `http://localhost:5050`.
 
 O comando `ai-memory mcp` inicia o servidor MCP via STDIO. Ele já expõe ferramentas para agentes consultarem a memória local indexada:
 
@@ -458,7 +472,7 @@ Resposta final ao usuário:
 3. Criar extração automática de regras de negócio.
 4. Criar tabela de relações entre símbolos.
 5. Criar reranking.
-6. Criar dashboard simples de memória.
+6. Evoluir dashboard de memória com ações de manutenção.
 7. Criar comandos para limpeza e reindexação por projeto.
 
 ---

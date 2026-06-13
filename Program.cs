@@ -7,6 +7,8 @@ var dbOption = new Option<string?>("--db", "PostgreSQL database name or connecti
 var ollamaOption = new Option<string?>("--ollama", "Ollama base URL override");
 var modelOption = new Option<string?>("--model", "Ollama embedding model override");
 var workspaceOption = new Option<string?>("--workspace", "Workspace name override");
+var dashboardProjectOption = new Option<string?>("--project", "Dashboard project filter");
+var portOption = new Option<int>("--port", () => 5050, "Dashboard HTTP port");
 
 var index = new Command("index", "Index configured projects or a specific project");
 var projectArg = new Argument<string?>("project", () => null, "Optional project name from configuration");
@@ -90,6 +92,20 @@ mcp.AddOption(ollamaOption);
 mcp.AddOption(modelOption);
 mcp.SetHandler(async (db, ollama, model) => await McpCommand.RunAsync(db, ollama, model), dbOption, ollamaOption, modelOption);
 
+var dashboard = new Command("dashboard", "Show memory dashboard summary");
+dashboard.AddOption(workspaceOption);
+dashboard.AddOption(dashboardProjectOption);
+dashboard.AddOption(dbOption);
+dashboard.SetHandler(async (workspace, project, db) => await DashboardCommand.RunAsync(workspace, project, db), workspaceOption, dashboardProjectOption, dbOption);
+
+var dashboardServe = new Command("serve", "Start local web dashboard");
+dashboardServe.AddOption(workspaceOption);
+dashboardServe.AddOption(dashboardProjectOption);
+dashboardServe.AddOption(dbOption);
+dashboardServe.AddOption(portOption);
+dashboardServe.SetHandler(async (workspace, project, db, port) => await DashboardCommand.ServeAsync(workspace, project, db, port), workspaceOption, dashboardProjectOption, dbOption, portOption);
+dashboard.AddCommand(dashboardServe);
+
 root.AddCommand(index);
 root.AddCommand(search);
 root.AddCommand(watch);
@@ -98,5 +114,6 @@ root.AddCommand(setup);
 root.AddCommand(workspace);
 root.AddCommand(project);
 root.AddCommand(mcp);
+root.AddCommand(dashboard);
 
 return await root.InvokeAsync(args);
