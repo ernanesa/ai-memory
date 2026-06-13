@@ -195,6 +195,8 @@ Dividir por significado.
 
 ### C#
 
+Implementação atual: parser Roslyn para arquivos `.cs`, com fallback textual simples quando não houver tipos reconhecíveis.
+
 Preferência:
 
 ```text
@@ -258,7 +260,6 @@ Começar com chunks de até aproximadamente 6.000 caracteres.
 
 Depois evoluir para:
 
-- Roslyn para C#;
 - parser SQL;
 - extração de símbolos;
 - relacionamento entre classes, interfaces e chamadas.
@@ -333,7 +334,7 @@ Essas fases são incrementais por `content_hash`. A tool processa chunks candida
 
 A fase `rules` considera sinais explícitos de regra de negócio, incluindo exceções de domínio, validações, FluentValidation e padrões de erro/notificação como `ErroContext`, `ErrosContext`, `AdicionarErro`, `AddErro`, `AddFailure`, `AddNotification`, `Notificar`, `RuleFor`, `Validator`, `TemErro`, `HasError`, `IsValid` e termos de domínio como bloqueado, cancelado, vencido, elegível e permitido.
 
-Durante `rules` e `knowledge`, a tool mostra progresso periódico com total processado, percentual, inseridos, atualizados, ignorados, estimativa de tempo restante e o arquivo/símbolo atual. Essa etapa pode demorar porque cada candidato precisa gerar embedding antes de ser salvo.
+Durante `chunks`, a tool mostra progresso a cada arquivo processado, percentual, total de chunks indexados, estimativa de tempo restante e arquivo atual. Durante `rules` e `knowledge`, mostra progresso por candidato com total processado, percentual, inseridos, atualizados, ignorados, estimativa de tempo restante e o arquivo/símbolo atual. Essas etapas podem demorar porque cada chunk ou candidato precisa gerar embedding antes de ser salvo.
 
 Por padrão, `rules` e `knowledge` analisam todos os chunks candidatos encontrados no escopo. Para limitar o recorte:
 
@@ -537,7 +538,7 @@ Resposta final ao usuário:
 - schema PostgreSQL;
 - indexação básica;
 - busca vetorial básica;
-- chunking inicial;
+- chunking inicial com Roslyn para C#;
 - comandos `index`, `search`, `watch` e `mcp`;
 - servidor MCP STDIO funcional;
 - ferramentas MCP `search_code`, `search_business_rules` e `find_related_files`.
@@ -545,7 +546,7 @@ Resposta final ao usuário:
 ### Próximas melhorias
 
 1. Implementar watcher real com debounce.
-2. Trocar chunking C# por Roslyn.
+2. Evoluir chunking C# com símbolos, relações e chamadas.
 3. Evoluir extração automática de regras de negócio e conhecimento com análise semântica mais profunda.
 4. Criar tabela de relações entre símbolos.
 5. Criar reranking.

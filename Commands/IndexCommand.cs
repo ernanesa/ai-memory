@@ -105,14 +105,23 @@ public static class IndexCommand
             }
 
             Console.WriteLine($"Indexing chunks for {workspaceName}/{configuredProject.Name}: {root}");
-            foreach (var file in chunker.EnumerateFiles(root))
+            var files = chunker.EnumerateFiles(root).ToList();
+            var progress = new ChunkIndexProgressReporter("chunk files", files.Count);
+            var indexedChunks = 0;
+
+            foreach (var file in files)
             {
+                var relativeFile = Path.GetRelativePath(root, file);
+                progress.BeforeItem(relativeFile);
+
                 foreach (var chunk in chunker.ChunkFile(configuredProject.Name, root, file))
                 {
                     try
                     {
                         var embedding = await ollamaService.EmbedAsync(chunk.Content);
                         await pg.UpsertChunkAsync(workspaceName, chunk, embedding);
+                        indexedChunks++;
+                        progress.AfterChunk(indexedChunks);
                     }
                     catch (Exception ex)
                     {
@@ -123,8 +132,11 @@ public static class IndexCommand
                             ex);
                     }
                 }
-                Console.WriteLine($"  indexed {Path.GetRelativePath(root, file)}");
+
+                progress.AfterItem(indexedChunks);
             }
+
+            progress.Complete(indexedChunks);
         }
     }
 
@@ -614,6 +626,87 @@ public static class IndexCommand
             Console.WriteLine(
                 $"  processing {_label}: {_processed:N0}/{_total:N0} ({percent}%) " +
                 $"inserted {inserted:N0}, updated {updated:N0}, skipped {skipped:N0}, {remaining}" +
+                $"{(string.IsNullOrWhiteSpace(_current) ? "" : $" | {_current}")}");
+        }
+
+        private static string TruncateForProgress(string value)
+        {
+            value = Regex.Replace(value, @"\s+", " ").Trim();
+            return value.Length <= 100 ? value : value[..97] + "...";
+        }
+    }
+
+    private sealed class ChunkIndexProgressReporter
+    {
+        private static readonly TimeSpan TimeInterval = TimeSpan.FromSeconds(5);
+
+        private readonly string _label;
+        private readonly int _total;
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private TimeSpan _lastReport = TimeSpan.Zero;
+        private int _processed;
+        private string _current = "";
+
+        public ChunkIndexProgressReporter(string label, int total)
+        {
+            _label = label;
+            _total = total;
+            if (total == 0)
+            {
+                Console.WriteLine($"  processing {label}: no files");
+            }
+            else
+            {
+                Console.WriteLine($"  processing {label}: 0/{total:N0} (0%)");
+            }
+        }
+
+        public void BeforeItem(string current)
+        {
+            _current = TruncateForProgress(current);
+        }
+
+        public void AfterItem(int indexedChunks)
+        {
+            _processed++;
+            Report(indexedChunks);
+        }
+
+        public void AfterChunk(int indexedChunks)
+        {
+            if (_stopwatch.Elapsed - _lastReport >= TimeInterval)
+            {
+                Report(indexedChunks);
+            }
+        }
+
+        public void Complete(int indexedChunks)
+        {
+            if (_total == 0)
+            {
+                return;
+            }
+
+            if (_processed != _total)
+            {
+                Report(indexedChunks);
+            }
+        }
+
+        private void Report(int indexedChunks)
+        {
+            _lastReport = _stopwatch.Elapsed;
+            var percent = _total == 0 ? 100 : (int)Math.Round(_processed * 100d / _total);
+            var rate = _stopwatch.Elapsed.TotalSeconds <= 0 ? 0 : _processed / _stopwatch.Elapsed.TotalSeconds;
+            var remaining = _processed >= _total
+                ? "done"
+                : rate <= 0
+                ? "eta unknown"
+                : $"eta {TimeSpan.FromSeconds((_total - _processed) / rate):hh\\:mm\\:ss}";
+
+            Console.WriteLine(
+                $"  processing {_label}: {_processed:N0}/{_total:N0} ({percent}%) " +
+                $"chunks {indexedChunks:N0}, {remaining}" +
                 $"{(string.IsNullOrWhiteSpace(_current) ? "" : $" | {_current}")}");
         }
 
