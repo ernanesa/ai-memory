@@ -141,6 +141,14 @@ Exemplo:
 Cliente bloqueado não pode gerar nova cobrança.
 ```
 
+Para aumentar confiabilidade, regras podem ser registradas como:
+
+- `candidate`: descoberta ainda não revisada;
+- `accepted`: regra validada;
+- `rejected`: falso positivo ou regra obsoleta.
+
+Cada regra pode guardar evidência (`evidence`), símbolo de origem (`symbol_name`) e vínculo com o chunk (`chunk_id`). Regra sem evidência deve ser tratada como hipótese, não como fato consolidado.
+
 ### `ai_knowledge`
 
 Guarda conhecimento de engenharia:
@@ -151,6 +159,14 @@ Guarda conhecimento de engenharia:
 - integrações;
 - riscos;
 - observações geradas pelos agentes.
+
+Assim como regras de negócio, registros de conhecimento podem ser:
+
+- `candidate`: descoberta ainda não revisada;
+- `accepted`: conhecimento validado;
+- `rejected`: falso positivo ou informação obsoleta.
+
+Cada registro pode guardar evidência (`evidence`), símbolo de origem (`symbol_name`) e vínculo com o chunk (`chunk_id`). Conhecimento sem evidência deve ser tratado como inferência, não como fato consolidado.
 
 ---
 

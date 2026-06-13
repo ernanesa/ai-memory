@@ -42,6 +42,12 @@ public static class DashboardCommand
         Console.WriteLine($"  Projects without chunks:  {health.ProjectsWithoutChunks:N0}");
         Console.WriteLine($"  Duplicate project names:  {health.DuplicateProjectNames:N0}");
         Console.WriteLine($"  Broken chunk references:  {health.BrokenChunkReferences:N0}");
+        Console.WriteLine($"  Candidate rules:          {health.CandidateBusinessRules:N0}");
+        Console.WriteLine($"  Rules without evidence:   {health.BusinessRulesWithoutEvidence:N0}");
+        Console.WriteLine($"  Rules without source:     {health.BusinessRulesWithoutSource:N0}");
+        Console.WriteLine($"  Candidate knowledge:      {health.CandidateKnowledge:N0}");
+        Console.WriteLine($"  Knowledge without evidence: {health.KnowledgeWithoutEvidence:N0}");
+        Console.WriteLine($"  Knowledge without source: {health.KnowledgeWithoutSource:N0}");
 
         if (workspaces.Count > 0)
         {
@@ -459,12 +465,18 @@ public static class DashboardCommand
                 WHERE ($1::text IS NULL OR w.name = $1)
                   AND ($2::text IS NULL OR p.name = $2 OR p.root_path ILIKE '%' || $2 || '%' OR w.name || '/' || p.name = $2)
             )
-            SELECT p.name, r.title, r.description, r.source_file, r.confidence, r.created_at
+            SELECT p.name, r.title, r.description, r.source_file, r.symbol_name, r.status, r.evidence, r.confidence, r.created_at, r.updated_at
             FROM ai_business_rules r
             LEFT JOIN filtered_projects p ON p.id = r.project_id
             WHERE p.id IS NOT NULL
-              AND ($3::text IS NULL OR r.title ILIKE '%' || $3 || '%' OR r.description ILIKE '%' || $3 || '%' OR r.source_file ILIKE '%' || $3 || '%')
-            ORDER BY r.created_at DESC
+              AND ($3::text IS NULL
+                   OR r.title ILIKE '%' || $3 || '%'
+                   OR r.description ILIKE '%' || $3 || '%'
+                   OR r.source_file ILIKE '%' || $3 || '%'
+                   OR r.symbol_name ILIKE '%' || $3 || '%'
+                   OR r.status ILIKE '%' || $3 || '%'
+                   OR r.evidence ILIKE '%' || $3 || '%')
+            ORDER BY r.updated_at DESC
             LIMIT $4;
             """;
             AddScopeParameters(cmd, workspace, project);
@@ -480,8 +492,12 @@ public static class DashboardCommand
                     reader.GetString(1),
                     reader.GetString(2),
                     GetNullableString(reader, 3),
-                    reader.IsDBNull(4) ? null : reader.GetDecimal(4),
-                    GetNullableDateTime(reader, 5)));
+                    GetNullableString(reader, 4),
+                    reader.GetString(5),
+                    GetNullableString(reader, 6),
+                    reader.IsDBNull(7) ? null : reader.GetDecimal(7),
+                    GetNullableDateTime(reader, 8),
+                    GetNullableDateTime(reader, 9)));
             }
 
             return rows;
@@ -500,11 +516,18 @@ public static class DashboardCommand
                 WHERE ($1::text IS NULL OR w.name = $1)
                   AND ($2::text IS NULL OR p.name = $2 OR p.root_path ILIKE '%' || $2 || '%' OR w.name || '/' || p.name = $2)
             )
-            SELECT p.name, k.kind, k.title, k.content, k.source, k.confidence, k.updated_at
+            SELECT p.name, k.kind, k.title, k.content, k.source, k.symbol_name, k.status, k.evidence, k.confidence, k.updated_at
             FROM ai_knowledge k
             LEFT JOIN filtered_projects p ON p.id = k.project_id
             WHERE p.id IS NOT NULL
-              AND ($3::text IS NULL OR k.kind ILIKE '%' || $3 || '%' OR k.title ILIKE '%' || $3 || '%' OR k.content ILIKE '%' || $3 || '%' OR k.source ILIKE '%' || $3 || '%')
+              AND ($3::text IS NULL
+                   OR k.kind ILIKE '%' || $3 || '%'
+                   OR k.title ILIKE '%' || $3 || '%'
+                   OR k.content ILIKE '%' || $3 || '%'
+                   OR k.source ILIKE '%' || $3 || '%'
+                   OR k.symbol_name ILIKE '%' || $3 || '%'
+                   OR k.status ILIKE '%' || $3 || '%'
+                   OR k.evidence ILIKE '%' || $3 || '%')
             ORDER BY k.updated_at DESC
             LIMIT $4;
             """;
@@ -522,8 +545,11 @@ public static class DashboardCommand
                     reader.GetString(2),
                     reader.GetString(3),
                     GetNullableString(reader, 4),
-                    reader.IsDBNull(5) ? null : reader.GetDecimal(5),
-                    GetNullableDateTime(reader, 6)));
+                    GetNullableString(reader, 5),
+                    reader.GetString(6),
+                    GetNullableString(reader, 7),
+                    reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+                    GetNullableDateTime(reader, 9)));
             }
 
             return rows;
@@ -546,7 +572,13 @@ public static class DashboardCommand
                 (SELECT count(*) FROM ai_chunks c JOIN filtered_projects fp ON fp.id = c.project_id WHERE c.embedding IS NULL) AS chunks_without_embedding,
                 (SELECT count(*) FROM filtered_projects fp WHERE NOT EXISTS (SELECT 1 FROM ai_chunks c WHERE c.project_id = fp.id)) AS projects_without_chunks,
                 (SELECT count(*) FROM (SELECT name FROM filtered_projects GROUP BY name HAVING count(*) > 1) duplicates) AS duplicate_project_names,
-                (SELECT count(*) FROM ai_chunks c LEFT JOIN ai_projects p ON p.id = c.project_id WHERE p.id IS NULL) AS broken_chunk_references;
+                (SELECT count(*) FROM ai_chunks c LEFT JOIN ai_projects p ON p.id = c.project_id WHERE p.id IS NULL) AS broken_chunk_references,
+                (SELECT count(*) FROM ai_business_rules r JOIN filtered_projects fp ON fp.id = r.project_id WHERE r.status = 'candidate') AS candidate_business_rules,
+                (SELECT count(*) FROM ai_business_rules r JOIN filtered_projects fp ON fp.id = r.project_id WHERE r.status <> 'rejected' AND NULLIF(btrim(COALESCE(r.evidence, '')), '') IS NULL) AS business_rules_without_evidence,
+                (SELECT count(*) FROM ai_business_rules r JOIN filtered_projects fp ON fp.id = r.project_id WHERE r.status <> 'rejected' AND NULLIF(btrim(COALESCE(r.source_file, '')), '') IS NULL) AS business_rules_without_source,
+                (SELECT count(*) FROM ai_knowledge k JOIN filtered_projects fp ON fp.id = k.project_id WHERE k.status = 'candidate') AS candidate_knowledge,
+                (SELECT count(*) FROM ai_knowledge k JOIN filtered_projects fp ON fp.id = k.project_id WHERE k.status <> 'rejected' AND NULLIF(btrim(COALESCE(k.evidence, '')), '') IS NULL) AS knowledge_without_evidence,
+                (SELECT count(*) FROM ai_knowledge k JOIN filtered_projects fp ON fp.id = k.project_id WHERE k.status <> 'rejected' AND NULLIF(btrim(COALESCE(k.source, '')), '') IS NULL) AS knowledge_without_source;
             """;
             AddScopeParameters(cmd, workspace, project);
 
@@ -556,7 +588,13 @@ public static class DashboardCommand
                 reader.GetInt64(0),
                 reader.GetInt64(1),
                 reader.GetInt64(2),
-                reader.GetInt64(3));
+                reader.GetInt64(3),
+                reader.GetInt64(4),
+                reader.GetInt64(5),
+                reader.GetInt64(6),
+                reader.GetInt64(7),
+                reader.GetInt64(8),
+                reader.GetInt64(9));
         }
 
         private async Task EnsureOpenAsync()
@@ -640,8 +678,12 @@ public static class DashboardCommand
         string Title,
         string Description,
         string? SourceFile,
+        string? Symbol,
+        string Status,
+        string? Evidence,
         decimal? Confidence,
-        DateTime? CreatedAt);
+        DateTime? CreatedAt,
+        DateTime? UpdatedAt);
 
     public sealed record KnowledgeSummary(
         string Project,
@@ -649,6 +691,9 @@ public static class DashboardCommand
         string Title,
         string Content,
         string? Source,
+        string? Symbol,
+        string Status,
+        string? Evidence,
         decimal? Confidence,
         DateTime? UpdatedAt);
 
@@ -656,7 +701,13 @@ public static class DashboardCommand
         long ChunksWithoutEmbedding,
         long ProjectsWithoutChunks,
         long DuplicateProjectNames,
-        long BrokenChunkReferences);
+        long BrokenChunkReferences,
+        long CandidateBusinessRules,
+        long BusinessRulesWithoutEvidence,
+        long BusinessRulesWithoutSource,
+        long CandidateKnowledge,
+        long KnowledgeWithoutEvidence,
+        long KnowledgeWithoutSource);
 
     private const string Html = """
 <!doctype html>
@@ -887,9 +938,11 @@ public static class DashboardCommand
       const rows = await get("/api/business-rules", { q, limit: 200 });
       document.getElementById("rules-table").innerHTML = table([
         { label: "Project", key: "project", width: "18%" },
-        { label: "Title", key: "title", width: "22%" },
+        { label: "Status", render: r => `<span class="${r.status === "accepted" ? "status-ok" : r.status === "rejected" ? "status-danger" : "status-warn"}">${esc(r.status)}</span>`, width: "105px" },
+        { label: "Title", key: "title", width: "18%" },
         { label: "Description", key: "description" },
-        { label: "Source", key: "sourceFile", class: "mono truncate", width: "22%" },
+        { label: "Evidence", key: "evidence", width: "22%" },
+        { label: "Source", render: r => esc([r.sourceFile, r.symbol].filter(Boolean).join(" :: ") || "-"), class: "mono truncate", width: "22%" },
         { label: "Confidence", render: r => text(r.confidence), width: "100px" }
       ], rows);
     }
@@ -899,9 +952,12 @@ public static class DashboardCommand
       const rows = await get("/api/knowledge", { q, limit: 200 });
       document.getElementById("knowledge-table").innerHTML = table([
         { label: "Project", key: "project", width: "16%" },
+        { label: "Status", render: r => `<span class="${r.status === "accepted" ? "status-ok" : r.status === "rejected" ? "status-danger" : "status-warn"}">${esc(r.status)}</span>`, width: "105px" },
         { label: "Kind", key: "kind", width: "150px" },
-        { label: "Title", key: "title", width: "22%" },
+        { label: "Title", key: "title", width: "18%" },
         { label: "Content", key: "content" },
+        { label: "Evidence", key: "evidence", width: "20%" },
+        { label: "Source", render: r => esc([r.source, r.symbol].filter(Boolean).join(" :: ") || "-"), class: "mono truncate", width: "20%" },
         { label: "Confidence", render: r => text(r.confidence), width: "100px" }
       ], rows);
     }
@@ -912,7 +968,13 @@ public static class DashboardCommand
         ["Chunks without embedding", health.chunksWithoutEmbedding],
         ["Projects without chunks", health.projectsWithoutChunks],
         ["Duplicate project names", health.duplicateProjectNames],
-        ["Broken chunk references", health.brokenChunkReferences]
+        ["Broken chunk references", health.brokenChunkReferences],
+        ["Candidate business rules", health.candidateBusinessRules],
+        ["Business rules without evidence", health.businessRulesWithoutEvidence],
+        ["Business rules without source", health.businessRulesWithoutSource],
+        ["Candidate knowledge", health.candidateKnowledge],
+        ["Knowledge without evidence", health.knowledgeWithoutEvidence],
+        ["Knowledge without source", health.knowledgeWithoutSource]
       ].map(([name, value]) => ({ name, value }));
       document.getElementById("health-panel").innerHTML = table([
         { label: "Check", key: "name" },

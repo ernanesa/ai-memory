@@ -125,10 +125,11 @@ public sealed class PgVectorService : IAsyncDisposable
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-        SELECT p.name, r.title, r.description, r.source_file, r.confidence, r.embedding <=> $1 AS distance
+        SELECT p.name, r.title, r.description, r.source_file, r.symbol_name, r.status, r.evidence, r.confidence, r.embedding <=> $1 AS distance
         FROM ai_business_rules r
         LEFT JOIN ai_projects p ON p.id = r.project_id
         WHERE r.embedding IS NOT NULL
+          AND r.status <> 'rejected'
           AND (
               $3::text IS NULL
               OR p.name = $3
@@ -156,8 +157,11 @@ public sealed class PgVectorService : IAsyncDisposable
                 reader.GetString(1),
                 reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetDecimal(4),
-                reader.GetDouble(5)));
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetDecimal(7),
+                reader.GetDouble(8)));
         }
 
         return rows;
@@ -284,6 +288,9 @@ public sealed record BusinessRuleSearchResult(
     string Title,
     string Description,
     string? SourceFile,
+    string? Symbol,
+    string Status,
+    string? Evidence,
     decimal? Confidence,
     double Distance);
 
