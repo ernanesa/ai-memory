@@ -168,6 +168,19 @@ Assim como regras de negócio, registros de conhecimento podem ser:
 
 Cada registro pode guardar evidência (`evidence`), símbolo de origem (`symbol_name`) e vínculo com o chunk (`chunk_id`). Conhecimento sem evidência deve ser tratado como inferência, não como fato consolidado.
 
+### `ai_extraction_chunk_state`
+
+Controla o processamento incremental das fases de extração.
+
+Guarda, por chunk e por fase (`rules` ou `knowledge`):
+
+- `content_hash`: versão do conteúdo processado;
+- `status`: `processed` ou `failed`;
+- `processed_at`: quando a fase processou o chunk;
+- `error`: erro da última tentativa, quando houver.
+
+Isso permite que `ai-memory index rules --candidate-limit 2000` processe lotes diferentes a cada execução. Chunks já processados são ignorados enquanto o `content_hash` não mudar. Se um arquivo for reindexado ou atualizado pelo `watch`, o hash do chunk muda e ele volta a ser candidato para `rules` e `knowledge`.
+
 ---
 
 ## 4. Estratégia de chunking recomendada
@@ -264,7 +277,8 @@ ai-memory project add --workspace pagueOn
 ai-memory project list --workspace claps
 ai-memory index
 ai-memory index --workspace claps
-ai-memory index gestor --workspace claps
+ai-memory index chunks --project gestor --workspace claps
+ai-memory index rules knowledge --workspace claps
 ai-memory search "onde valida limite de crédito?"
 ai-memory watch
 ai-memory dashboard
@@ -283,6 +297,53 @@ ai-memory dashboard serve --port 5050
 ```
 
 O comando `dashboard` mostra um resumo no terminal. O comando `dashboard serve` inicia uma interface web local, por padrão em `http://localhost:5050`.
+
+O comando `index` é organizado por fases:
+
+```bash
+ai-memory index
+ai-memory index chunks
+ai-memory index rules
+ai-memory index knowledge
+ai-memory index chunks rules
+ai-memory index rules knowledge
+ai-memory index chunks knowledge
+ai-memory index chunks rules knowledge
+ai-memory index chunks --project gestor --workspace claps
+ai-memory index rules knowledge --candidate-limit 10000
+```
+
+Sem fases explícitas, `ai-memory index` representa o pipeline completo:
+
+```text
+chunks -> rules -> knowledge
+```
+
+As fases são:
+
+- `chunks`: lê os arquivos dos projetos configurados, quebra em chunks, gera embeddings e grava em `ai_chunks`;
+- `rules`: usa chunks já indexados para extrair/reconciliar regras de negócio em `ai_business_rules`;
+- `knowledge`: usa chunks já indexados para extrair/reconciliar conhecimento técnico em `ai_knowledge`.
+
+O filtro de projeto deve ser informado com `--project`. A sintaxe antiga `ai-memory index gestor --workspace claps` é aceita temporariamente por compatibilidade, mas deve ser substituída por `ai-memory index --project gestor --workspace claps`.
+
+As fases `rules` e `knowledge` fazem extração heurística conservadora a partir dos chunks já indexados. Elas criam novos candidatos, buscam evidências para candidatos existentes, atualizam confiança e mantêm `accepted`/`rejected` como estados explícitos de revisão. Candidatos nunca são promovidos automaticamente para `accepted`.
+
+Essas fases são incrementais por `content_hash`. A tool processa chunks candidatos que nunca foram processados naquela fase, que falharam anteriormente ou cujo conteúdo mudou desde a última extração.
+
+A fase `rules` considera sinais explícitos de regra de negócio, incluindo exceções de domínio, validações, FluentValidation e padrões de erro/notificação como `ErroContext`, `ErrosContext`, `AdicionarErro`, `AddErro`, `AddFailure`, `AddNotification`, `Notificar`, `RuleFor`, `Validator`, `TemErro`, `HasError`, `IsValid` e termos de domínio como bloqueado, cancelado, vencido, elegível e permitido.
+
+Durante `rules` e `knowledge`, a tool mostra progresso periódico com total processado, percentual, inseridos, atualizados, ignorados, estimativa de tempo restante e o arquivo/símbolo atual. Essa etapa pode demorar porque cada candidato precisa gerar embedding antes de ser salvo.
+
+Por padrão, `rules` e `knowledge` analisam todos os chunks candidatos encontrados no escopo. Para limitar o recorte:
+
+```bash
+ai-memory index rules --candidate-limit 5000
+ai-memory index knowledge --candidate-limit 10000
+ai-memory index rules knowledge --candidate-limit 2000
+```
+
+A saída mostra quantos chunks existem no escopo, quantos combinam com os filtros de candidato, quantos ainda estão pendentes por fase/hash e quantos foram selecionados para processamento. Quando nenhum `--candidate-limit` é informado, a tool mostra um aviso em amarelo informando que todos os chunks candidatos pendentes serão processados, que a etapa pode demorar porque cada candidato gera embedding, e que é possível usar `--candidate-limit <n>` para processar um lote menor.
 
 O comando `ai-memory mcp` inicia o servidor MCP via STDIO. Ele já expõe ferramentas para agentes consultarem a memória local indexada:
 
@@ -485,7 +546,7 @@ Resposta final ao usuário:
 
 1. Implementar watcher real com debounce.
 2. Trocar chunking C# por Roslyn.
-3. Criar extração automática de regras de negócio.
+3. Evoluir extração automática de regras de negócio e conhecimento com análise semântica mais profunda.
 4. Criar tabela de relações entre símbolos.
 5. Criar reranking.
 6. Evoluir dashboard de memória com ações de manutenção.

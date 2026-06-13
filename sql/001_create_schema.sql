@@ -76,6 +76,21 @@ CREATE TABLE IF NOT EXISTS ai_knowledge (
     CHECK (status IN ('candidate', 'accepted', 'rejected'))
 );
 
+CREATE TABLE IF NOT EXISTS ai_extraction_chunk_state (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chunk_id UUID NOT NULL REFERENCES ai_chunks(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    processed_at TIMESTAMPTZ,
+    error TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(chunk_id, stage),
+    CHECK (stage IN ('rules', 'knowledge')),
+    CHECK (status IN ('processed', 'failed'))
+);
+
 CREATE INDEX IF NOT EXISTS ai_chunks_embedding_idx
 ON ai_chunks
 USING hnsw (embedding vector_cosine_ops);
@@ -99,3 +114,9 @@ ON ai_knowledge(project_id, status);
 
 CREATE INDEX IF NOT EXISTS ai_knowledge_chunk_id_idx
 ON ai_knowledge(chunk_id);
+
+CREATE INDEX IF NOT EXISTS ai_extraction_chunk_state_stage_status_idx
+ON ai_extraction_chunk_state(stage, status);
+
+CREATE INDEX IF NOT EXISTS ai_extraction_chunk_state_chunk_stage_hash_idx
+ON ai_extraction_chunk_state(chunk_id, stage, content_hash);

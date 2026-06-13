@@ -7,17 +7,29 @@ var dbOption = new Option<string?>("--db", "PostgreSQL database name or connecti
 var ollamaOption = new Option<string?>("--ollama", "Ollama base URL override");
 var modelOption = new Option<string?>("--model", "Ollama embedding model override");
 var workspaceOption = new Option<string?>("--workspace", "Workspace name override");
-var dashboardProjectOption = new Option<string?>("--project", "Dashboard project filter");
+var projectFilterOption = new Option<string?>("--project", "Project filter");
 var portOption = new Option<int>("--port", () => 5050, "Dashboard HTTP port");
+var candidateLimitOption = new Option<int?>("--candidate-limit", "Max chunks considered by rules/knowledge extraction stages");
 
-var index = new Command("index", "Index configured projects or a specific project");
-var projectArg = new Argument<string?>("project", () => null, "Optional project name from configuration");
-index.AddArgument(projectArg);
+var index = new Command("index", "Index memory stages for configured projects");
+var indexStagesArg = new Argument<string[]>("stages", () => [], "Optional stages: chunks, rules, knowledge");
+index.AddArgument(indexStagesArg);
 index.AddOption(dbOption);
 index.AddOption(ollamaOption);
 index.AddOption(modelOption);
 index.AddOption(workspaceOption);
-index.SetHandler(async (project, workspace, db, ollama, model) => await IndexCommand.RunAsync(project, workspace, db, ollama, model), projectArg, workspaceOption, dbOption, ollamaOption, modelOption);
+index.AddOption(projectFilterOption);
+index.AddOption(candidateLimitOption);
+index.SetHandler(
+    async (stages, project, workspace, db, ollama, model, candidateLimit) =>
+        await IndexCommand.RunAsync(stages, project, workspace, db, ollama, model, candidateLimit),
+    indexStagesArg,
+    projectFilterOption,
+    workspaceOption,
+    dbOption,
+    ollamaOption,
+    modelOption,
+    candidateLimitOption);
 
 var search = new Command("search", "Search engineering memory");
 var queryArg = new Argument<string>("query", "Search query");
@@ -94,16 +106,16 @@ mcp.SetHandler(async (db, ollama, model) => await McpCommand.RunAsync(db, ollama
 
 var dashboard = new Command("dashboard", "Show memory dashboard summary");
 dashboard.AddOption(workspaceOption);
-dashboard.AddOption(dashboardProjectOption);
+dashboard.AddOption(projectFilterOption);
 dashboard.AddOption(dbOption);
-dashboard.SetHandler(async (workspace, project, db) => await DashboardCommand.RunAsync(workspace, project, db), workspaceOption, dashboardProjectOption, dbOption);
+dashboard.SetHandler(async (workspace, project, db) => await DashboardCommand.RunAsync(workspace, project, db), workspaceOption, projectFilterOption, dbOption);
 
 var dashboardServe = new Command("serve", "Start local web dashboard");
 dashboardServe.AddOption(workspaceOption);
-dashboardServe.AddOption(dashboardProjectOption);
+dashboardServe.AddOption(projectFilterOption);
 dashboardServe.AddOption(dbOption);
 dashboardServe.AddOption(portOption);
-dashboardServe.SetHandler(async (workspace, project, db, port) => await DashboardCommand.ServeAsync(workspace, project, db, port), workspaceOption, dashboardProjectOption, dbOption, portOption);
+dashboardServe.SetHandler(async (workspace, project, db, port) => await DashboardCommand.ServeAsync(workspace, project, db, port), workspaceOption, projectFilterOption, dbOption, portOption);
 dashboard.AddCommand(dashboardServe);
 
 root.AddCommand(index);
