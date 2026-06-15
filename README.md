@@ -427,132 +427,15 @@ A localização exata do arquivo depende da extensão/agente usado.
 
 ---
 
-## 8. Skills / instruções para agentes
+## 8. Instruções para agentes
 
-### Skill: engenharia com memória
+Os prompts e skills ficam em arquivos separados para facilitar reutilização em outros projetos:
 
-```md
----
-name: ma9-context-first-response
-description: 'Forca resposta baseada em contexto antes de opinar sobre codigo, arquitetura ou regra de negocio. Use quando pedir analise tecnica, explicacao de codigo, proposta de implementacao, revisao arquitetural ou recomendacao de padrao. Executa fluxo: consultar memoria, buscar codigo relacionado, buscar regras de negocio, buscar decisoes arquiteturais, e so depois responder com fatos vs inferencias, incertezas e referencias de arquivos.'
-argument-hint: 'Tema/pergunta tecnica que precisa de resposta com lastro em codigo e contexto'
-user-invocable: true
----
+- [Prompt ai-memory MCP first](ai-config-files/ai-memory-mcp-first.md)
+- [Skill: engenharia com memória](ai-config-files//skills/ma9-context-first-response.md)
+- [Skill: refatoração](ai-config-files//skills/ma9-refactor-impact-first.md)
 
-# Context First Response
-
-## Objetivo
-Gerar respostas tecnicas com rastreabilidade, reduzindo alucinacao e sugestoes que conflitem com o codigo existente.
-
-## Quando usar
-- Perguntas sobre codigo, arquitetura, regra de negocio ou trade-offs tecnicos.
-- Pedidos de implementacao, refatoracao, code review ou troubleshooting.
-- Situacoes em que o usuario quer evidencias concretas no repositorio.
-
-## Nao usar
-- Conversa casual sem conteudo tecnico.
-- Solicitacoes sem necessidade de validacao por codigo (ex.: texto institucional).
-
-## Fluxo obrigatorio
-1. Consultar ai-memory antes de qualquer conclusao.
-2. Buscar codigo relacionado ao pedido (arquivos, simbolos, chamadas e testes).
-3. Buscar regras de negocio relacionadas (docs, contratos, validacoes, regras em codigo).
-4. Buscar decisoes arquiteturais relacionadas (ADRs, convencoes, camadas, dependencias).
-5. So entao montar a resposta final.
-
-## Regras de decisao
-- Se faltar evidencias em um dos 4 blocos (memoria, codigo, negocio, arquitetura), declarar explicitamente a lacuna.
-- Se houver conflito entre sugestao e implementacao atual, priorizar aderencia ao codigo existente e sinalizar alternativa como opcional.
-- Se nao houver certeza suficiente, perguntar apenas o minimo necessario para desbloquear.
-
-## Criterios de qualidade antes de responder
-- Ha pelo menos uma evidencia concreta de codigo relacionada ao tema.
-- Ha indicacao clara do que e fato observado e do que e inferencia.
-- Ha secao de incertezas/riscos quando aplicavel.
-- Nao ha recomendacao que contradiga padrao vigente sem justificativa explicita.
-
-## Formato de resposta
-- Arquivos relevantes: liste os arquivos usados como base.
-- Fatos observados: afirmacoes verificadas no contexto.
-- Inferencias: hipoteses ou extrapolacoes, rotuladas como tal.
-- Incertezas: pontos que dependem de confirmacao.
-- Recomendacao aderente: proposta que respeita o codigo existente.
-
-## Checklist rapido
-- ai-memory consultada
-- codigo relacionado consultado
-- regra de negocio consultada
-- decisoes arquiteturais consultadas
-- fatos vs inferencias separados
-- incertezas destacadas
-- sem conflito com padrao existente
-```
-
-### Skill: refatoração
-
-```md
----
-name: ma9-refactor-impact-first
-description: 'Guia propostas de refatoracao com base no codigo existente. Use quando pedir refatoracao, melhoria estrutural, simplificacao ou limpeza tecnica. Executa fluxo: buscar implementacoes similares, interfaces existentes, padroes do projeto e regras de negocio afetadas; evitar duplicacao; propor mudancas pequenas com impacto, arquivos envolvidos e riscos.'
-argument-hint: 'Area/codigo que precisa de proposta de refatoracao'
-user-invocable: true
----
-
-# Refactor Impact First
-
-## Objetivo
-Produzir propostas de refatoracao aderentes ao projeto, com baixo risco de regressao e sem duplicacao desnecessaria.
-
-## Quando usar
-- Pedido de refatoracao em codigo existente.
-- Pedido de melhoria de design sem mudanca de regra de negocio.
-- Pedido de consolidacao de implementacoes repetidas.
-
-## Nao usar
-- Criacao de feature nova sem relacao com codigo existente.
-- Mudancas exploratorias sem base em evidencias do repositorio.
-
-## Fluxo obrigatorio antes de propor refatoracao
-1. Procurar implementacoes similares no projeto.
-2. Procurar interfaces ja existentes reutilizaveis.
-3. Procurar padroes adotados no mesmo projeto (naming, camadas, estrutura, contratos).
-4. Procurar regras de negocio afetadas direta e indiretamente.
-5. Eliminar duplicacao na proposta (reuso > copia).
-
-## Decisoes e ramificacoes
-- Se existir implementacao similar confiavel: propor convergencia para o padrao existente.
-- Se existir interface compativel: priorizar extensao/adaptacao em vez de criar nova interface.
-- Se nao houver padrao claro: nao bloquear a proposta; declarar incerteza e sugerir menor mudanca reversivel com validacao rapida.
-- Se regra de negocio puder mudar comportamento: separar refatoracao estrutural de alteracao funcional.
-- Se reduzir duplicacao exigir grande impacto: propor plano em etapas pequenas com checkpoints.
-
-## Criterios de qualidade
-- A proposta explicita impacto tecnico e impacto funcional esperado.
-- Os arquivos envolvidos sao listados com o proposito de cada alteracao.
-- Riscos e possiveis regressos sao mapeados.
-- O plano vem em passos pequenos e verificaveis.
-- Nao recomenda padrao conflitante com o que ja existe no projeto sem justificativa.
-
-## Formato de resposta
-- Escopo da refatoracao: objetivo e limites.
-- Impacto tecnico: estrutura, acoplamento, reuso, testabilidade e manutencao.
-- Impacto funcional: comportamento que deve permanecer igual e pontos sensiveis de regressao.
-- Arquivos envolvidos: lista de arquivos e proposito de cada ponto de leitura/alteracao.
-- Riscos: regressao, acoplamento, compatibilidade e cobertura de testes.
-- Plano incremental: passos pequenos, com validacao a cada passo.
-
-## Checklist rapido
-- implementacoes similares mapeadas
-- interfaces existentes mapeadas
-- padroes do projeto mapeados
-- regras de negocio impactadas mapeadas
-- duplicacao evitada
-- impacto tecnico indicado
-- impacto funcional indicado
-- arquivos envolvidos com proposito indicados
-- riscos indicados
-- passos pequenos propostos
-```
+Copie esses arquivos, ou apenas os arquivos desejados, para os projetos em que o agente deve consultar o `ai-memory` antes de analisar código. Em seguida, cadastre o conteúdo como instrução de projeto, prompt compartilhado ou skill no Rider, VS Code, Codex ou outro agente usado pelo time.
 
 ---
 
