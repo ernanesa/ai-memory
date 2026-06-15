@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json.Serialization;
 using AiMemory.Configuration;
 using Npgsql;
@@ -8,7 +9,8 @@ namespace AiMemory.Commands;
 
 public static class SetupCommand
 {
-    private const string DefaultModel = "bge-m3";
+    private const string DefaultEmbeddingModel = "bge-m3";
+    private const string DefaultSemanticModel = "qwen2.5-coder:7b";
     private const int MaxVisibleLogLines = 10;
 
     public static async Task RunAsync()
@@ -95,7 +97,8 @@ public static class SetupCommand
             WriteMuted("Database user/password prompts skipped because a full connection string was provided.");
         }
         config.OllamaBaseUrl = Prompt("Ollama base URL", config.OllamaBaseUrl);
-        config.EmbeddingModel = PromptModel(state.OllamaModels, config.EmbeddingModel);
+        config.EmbeddingModel = PromptModel("Embedding model", state.OllamaModels, config.EmbeddingModel, DefaultEmbeddingModel);
+        config.SemanticModel = PromptModel("Semantic extraction model", state.OllamaModels, config.SemanticModel, DefaultSemanticModel);
     }
 
     private static void CollectWorkspaces(AiMemoryConfig config)
@@ -187,8 +190,17 @@ public static class SetupCommand
             && PromptYesNo($"Create PostgreSQL database '{databaseName}' if needed?", true);
 
         var applySchema = PromptYesNo("Apply/update AI Memory database schema after database is reachable?", true);
-        var pullModel = !state.OllamaModels.Any(m => m.Equals(config.EmbeddingModel, StringComparison.OrdinalIgnoreCase))
-            && PromptYesNo($"Pull Ollama model '{config.EmbeddingModel}' if missing?", true);
+        var modelsToPull = new List<string>();
+        foreach (var model in new[] { config.EmbeddingModel, config.SemanticModel }
+                     .Where(model => !string.IsNullOrWhiteSpace(model))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!state.OllamaModels.Any(m => m.Equals(model, StringComparison.OrdinalIgnoreCase)) &&
+                PromptYesNo($"Pull Ollama model '{model}' if missing?", true))
+            {
+                modelsToPull.Add(model);
+            }
+        }
 
         return new SetupPlan(
             installPackages.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
@@ -196,7 +208,7 @@ public static class SetupCommand
             startOllama,
             createDatabase,
             applySchema,
-            pullModel);
+            modelsToPull.ToArray());
     }
 
     private static void PrintPlan(SetupPlan plan)
@@ -227,9 +239,9 @@ public static class SetupCommand
             WriteBullet("apply/update database schema");
         }
 
-        if (plan.PullModel)
+        if (plan.ModelsToPull.Length > 0)
         {
-            WriteBullet("pull Ollama embedding model if missing");
+            WriteBullet($"pull missing Ollama model(s): {string.Join(", ", plan.ModelsToPull)}");
         }
 
         if (plan.IsEmpty)
@@ -272,9 +284,9 @@ public static class SetupCommand
             results.Add(await ApplySchemaAsync(config));
         }
 
-        if (plan.PullModel)
+        foreach (var model in plan.ModelsToPull)
         {
-            results.Add(await PullModelIfNeededAsync(config.OllamaBaseUrl, config.EmbeddingModel));
+            results.Add(await PullModelIfNeededAsync(config.OllamaBaseUrl, model));
         }
 
         return results;
@@ -384,16 +396,16 @@ public static class SetupCommand
             return SetupStepResult.Warning("Pull model", message);
         }
 
-        var result = await RunAndReportAsync("Pull Ollama model", "ollama", "pull", model);
+        var result = await RunAndReportAsync("Pull Ollama model", "ollama", ["pull", model], streamOutput: true);
         return ToStepResult("Pull model", result);
     }
 
-    private static string PromptModel(IReadOnlyList<string> models, string current)
+    private static string PromptModel(string label, IReadOnlyList<string> models, string current, string fallback)
     {
-        var defaultModel = string.IsNullOrWhiteSpace(current) ? DefaultModel : current;
+        var defaultModel = string.IsNullOrWhiteSpace(current) ? fallback : current;
         if (models.Count == 0)
         {
-            return Prompt("Embedding model", defaultModel);
+            return Prompt(label, defaultModel);
         }
 
         WriteSection("Available Ollama models");
@@ -404,7 +416,7 @@ public static class SetupCommand
 
         while (true)
         {
-            var answer = Prompt("Embedding model", defaultModel);
+            var answer = Prompt(label, defaultModel);
             if (int.TryParse(answer, out var selected) && selected >= 1 && selected <= models.Count)
             {
                 return models[selected - 1];
@@ -587,13 +599,32 @@ public static class SetupCommand
         string title,
         string fileName,
         IReadOnlyList<string> arguments,
+        bool streamOutput)
+    {
+        return await RunAndReportAsync(title, fileName, arguments, environment: null, streamOutput);
+    }
+
+    private static async Task<ProcessResult> RunAndReportAsync(
+        string title,
+        string fileName,
+        IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string?>? environment)
+    {
+        return await RunAndReportAsync(title, fileName, arguments, environment, streamOutput: false);
+    }
+
+    private static async Task<ProcessResult> RunAndReportAsync(
+        string title,
+        string fileName,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string?>? environment,
+        bool streamOutput)
     {
         WriteInfo(title);
         WriteMuted($"> {fileName} {string.Join(' ', arguments)}");
-        var result = await RunProcessAsync(fileName, arguments, quiet: false, environment);
+        var result = await RunProcessAsync(fileName, arguments, quiet: false, environment, streamOutput);
 
-        if (result.LogLines.Count > 0)
+        if (!streamOutput && result.LogLines.Count > 0)
         {
             WriteMuted($"Last {Math.Min(MaxVisibleLogLines, result.LogLines.Count)} log line(s):");
             foreach (var line in result.LogLines.TakeLast(MaxVisibleLogLines))
@@ -625,6 +656,16 @@ public static class SetupCommand
         bool quiet,
         IReadOnlyDictionary<string, string?>? environment)
     {
+        return await RunProcessAsync(fileName, arguments, quiet, environment, streamOutput: false);
+    }
+
+    private static async Task<ProcessResult> RunProcessAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        bool quiet,
+        IReadOnlyDictionary<string, string?>? environment,
+        bool streamOutput)
+    {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
@@ -650,14 +691,78 @@ public static class SetupCommand
         }
 
         var logLines = new List<string>();
-        process.OutputDataReceived += (_, e) => CaptureLogLine(e.Data, quiet, logLines);
-        process.ErrorDataReceived += (_, e) => CaptureLogLine(e.Data, quiet, logLines);
-
         process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        await process.WaitForExitAsync();
+
+        if (streamOutput)
+        {
+            var outputTask = StreamProcessOutputAsync(process.StandardOutput, Console.Out, quiet, logLines);
+            var errorTask = StreamProcessOutputAsync(process.StandardError, Console.Error, quiet, logLines);
+            await process.WaitForExitAsync();
+            await Task.WhenAll(outputTask, errorTask);
+            if (!quiet)
+            {
+                Console.WriteLine();
+            }
+        }
+        else
+        {
+            process.OutputDataReceived += (_, e) => CaptureLogLine(e.Data, quiet, logLines);
+            process.ErrorDataReceived += (_, e) => CaptureLogLine(e.Data, quiet, logLines);
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            await process.WaitForExitAsync();
+        }
+
         return new ProcessResult(process.ExitCode, logLines);
+    }
+
+    private static async Task StreamProcessOutputAsync(
+        TextReader reader,
+        TextWriter writer,
+        bool quiet,
+        List<string> logLines)
+    {
+        var buffer = new char[1024];
+        var currentLine = new StringBuilder();
+        while (true)
+        {
+            var read = await reader.ReadAsync(buffer, 0, buffer.Length);
+            if (read == 0)
+            {
+                break;
+            }
+
+            if (!quiet)
+            {
+                await writer.WriteAsync(buffer, 0, read);
+                await writer.FlushAsync();
+            }
+
+            CaptureLogText(buffer.AsSpan(0, read), quiet, logLines, currentLine);
+        }
+
+        if (currentLine.Length > 0)
+        {
+            CaptureLogLine(currentLine.ToString(), quiet, logLines);
+        }
+    }
+
+    private static void CaptureLogText(ReadOnlySpan<char> text, bool quiet, List<string> logLines, StringBuilder currentLine)
+    {
+        foreach (var ch in text)
+        {
+            if (ch is '\r' or '\n')
+            {
+                if (currentLine.Length > 0)
+                {
+                    CaptureLogLine(currentLine.ToString(), quiet, logLines);
+                    currentLine.Clear();
+                }
+                continue;
+            }
+
+            currentLine.Append(ch);
+        }
     }
 
     private static void CaptureLogLine(string? line, bool quiet, List<string> logLines)
@@ -667,10 +772,13 @@ public static class SetupCommand
             return;
         }
 
-        logLines.Add(line);
-        if (!quiet && logLines.Count > MaxVisibleLogLines * 20)
+        lock (logLines)
         {
-            logLines.RemoveRange(0, logLines.Count - MaxVisibleLogLines);
+            logLines.Add(line);
+            if (!quiet && logLines.Count > MaxVisibleLogLines * 20)
+            {
+                logLines.RemoveRange(0, logLines.Count - MaxVisibleLogLines);
+            }
         }
     }
 
@@ -789,7 +897,7 @@ public static class SetupCommand
         bool StartOllama,
         bool CreateDatabase,
         bool ApplySchema,
-        bool PullModel)
+        string[] ModelsToPull)
     {
         public bool IsEmpty =>
             InstallBrewPackages.Length == 0 &&
@@ -797,7 +905,7 @@ public static class SetupCommand
             !StartOllama &&
             !CreateDatabase &&
             !ApplySchema &&
-            !PullModel;
+            ModelsToPull.Length == 0;
     }
 
     private enum SetupStepStatus

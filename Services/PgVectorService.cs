@@ -59,6 +59,67 @@ public sealed class PgVectorService : IAsyncDisposable
     OR c.content ILIKE '%HACK%'
     """;
 
+    private const string SemanticRuleCandidatePredicate = $"""
+    (
+        {RuleCandidatePredicate}
+        OR c.file_path ILIKE '%handler%'
+        OR c.file_path ILIKE '%service%'
+        OR c.file_path ILIKE '%application%'
+        OR c.file_path ILIKE '%domain%'
+        OR c.file_path ILIKE '%usecase%'
+        OR c.file_path ILIKE '%use_case%'
+        OR c.file_path ILIKE '%policy%'
+        OR c.file_path ILIKE '%policies%'
+        OR c.file_path ILIKE '%specification%'
+        OR c.file_path ILIKE '%specifications%'
+        OR c.file_path ILIKE '%query%'
+        OR c.symbol_name ILIKE '%handler%'
+        OR c.symbol_name ILIKE '%service%'
+        OR c.symbol_name ILIKE '%application%'
+        OR c.symbol_name ILIKE '%domain%'
+        OR c.symbol_name ILIKE '%usecase%'
+        OR c.symbol_name ILIKE '%policy%'
+        OR c.symbol_name ILIKE '%specification%'
+        OR c.symbol_name ILIKE '%validar%'
+        OR c.symbol_name ILIKE '%validate%'
+        OR c.symbol_name ILIKE '%pode%'
+        OR c.symbol_name ILIKE '%permite%'
+        OR c.symbol_name ILIKE '%elegiv%'
+        OR c.symbol_name ILIKE '%cancel%'
+        OR c.symbol_name ILIKE '%aprova%'
+        OR c.symbol_name ILIKE '%bloque%'
+        OR c.symbol_name ILIKE '%venc%'
+    )
+    AND NOT (
+        c.file_path ILIKE '%/constants/%'
+        OR c.file_path ILIKE '%\\constants\\%'
+        OR c.file_path ILIKE '%/constant/%'
+        OR c.file_path ILIKE '%\\constant\\%'
+        OR c.file_path ILIKE '%/mappings/%'
+        OR c.file_path ILIKE '%\\mappings\\%'
+        OR c.file_path ILIKE '%/mapping/%'
+        OR c.file_path ILIKE '%\\mapping\\%'
+        OR c.file_path ILIKE '%/entitiemappings/%'
+        OR c.file_path ILIKE '%\\entitiemappings\\%'
+        OR c.file_path ILIKE '%/configurations/%'
+        OR c.file_path ILIKE '%\\configurations\\%'
+        OR c.file_path ILIKE '%/configuration/%'
+        OR c.file_path ILIKE '%\\configuration\\%'
+        OR c.file_path ILIKE '%/options/%'
+        OR c.file_path ILIKE '%\\options\\%'
+        OR c.file_path ILIKE '%dto.cs'
+        OR c.file_path ILIKE '%request.cs'
+        OR c.file_path ILIKE '%response.cs'
+        OR c.file_path ILIKE '%viewmodel.cs'
+        OR c.content ILIKE '%IEntityTypeConfiguration<%'
+        OR c.content ILIKE '%EntityTypeBuilder<%'
+        OR (
+            c.chunk_type = 'type'
+            AND c.content ILIKE '% interface %'
+        )
+    )
+    """;
+
     private readonly NpgsqlDataSource _dataSource;
 
     public PgVectorService(string connectionString)
@@ -106,6 +167,46 @@ public sealed class PgVectorService : IAsyncDisposable
         cmd.Parameters.AddWithValue(chunk.ContentHash);
         cmd.Parameters.AddWithValue(new Vector(embedding));
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> DeleteEntityFrameworkMigrationChunksAsync(string workspace, IReadOnlyList<string> projects, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        var entityFrameworkMigrationFilePredicate = EntityFrameworkMigrationFilePredicate("c");
+        cmd.CommandText = $"""
+        DELETE FROM ai_chunks c
+        USING ai_projects p, ai_workspace_projects wp, ai_workspaces w
+        WHERE c.project_id = p.id
+          AND wp.project_id = p.id
+          AND w.id = wp.workspace_id
+          AND w.name = $1
+          AND (cardinality($2::text[]) = 0 OR p.name = ANY($2))
+          AND ({entityFrameworkMigrationFilePredicate});
+        """;
+        cmd.Parameters.AddWithValue(workspace);
+        cmd.Parameters.AddWithValue(projects.ToArray());
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> DeleteTestChunksAsync(string workspace, IReadOnlyList<string> projects, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        var testFilePredicate = TestFilePredicate("c", "p");
+        cmd.CommandText = $"""
+        DELETE FROM ai_chunks c
+        USING ai_projects p, ai_workspace_projects wp, ai_workspaces w
+        WHERE c.project_id = p.id
+          AND wp.project_id = p.id
+          AND w.id = wp.workspace_id
+          AND w.name = $1
+          AND (cardinality($2::text[]) = 0 OR p.name = ANY($2))
+          AND ({testFilePredicate});
+        """;
+        cmd.Parameters.AddWithValue(workspace);
+        cmd.Parameters.AddWithValue(projects.ToArray());
+        return await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyList<(string Project, string File, string? Symbol, string Content, double Distance)>> SearchAsync(float[] embedding, int limit, CancellationToken ct = default)
@@ -311,20 +412,25 @@ public sealed class PgVectorService : IAsyncDisposable
         return rows;
     }
 
-    public async Task<ExtractionStats> GetRuleExtractionStatsAsync(string workspace, IReadOnlyList<string> projects, CancellationToken ct = default)
+    public async Task<ExtractionStats> GetRuleExtractionStatsAsync(string workspace, IReadOnlyList<string> projects, bool semantic, CancellationToken ct = default)
     {
-        return await GetExtractionStatsAsync(workspace, projects, "rules", RuleCandidatePredicate, ct);
+        return await GetExtractionStatsAsync(workspace, projects, "rules", semantic ? SemanticRuleCandidatePredicate : RuleCandidatePredicate, ct);
     }
 
-    public async Task<ExtractionStats> GetKnowledgeExtractionStatsAsync(string workspace, IReadOnlyList<string> projects, CancellationToken ct = default)
+    public async Task<ExtractionStats> GetKnowledgeExtractionStatsAsync(string workspace, IReadOnlyList<string> projects, bool semantic, CancellationToken ct = default)
     {
-        return await GetExtractionStatsAsync(workspace, projects, "knowledge", KnowledgeCandidatePredicate, ct);
+        return await GetExtractionStatsAsync(workspace, projects, "knowledge", semantic ? "TRUE" : KnowledgeCandidatePredicate, ct);
     }
 
-    public async Task<IReadOnlyList<ExtractionChunkResult>> GetChunksForRuleExtractionAsync(string workspace, IReadOnlyList<string> projects, int? limit, CancellationToken ct = default)
+    public async Task<IReadOnlyList<ExtractionChunkResult>> GetChunksForRuleExtractionAsync(string workspace, IReadOnlyList<string> projects, int? limit, bool semantic, bool refresh, CancellationToken ct = default)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
+        var predicate = semantic ? SemanticRuleCandidatePredicate : RuleCandidatePredicate;
+        var indexableFilePredicate = IndexableFilePredicate("c", "p");
+        var statePredicate = refresh
+            ? "TRUE"
+            : "(s.id IS NULL OR s.content_hash <> c.content_hash OR s.status = 'failed')";
         cmd.CommandText = $"""
         SELECT c.id, p.name, c.file_path, c.language, c.chunk_type, c.symbol_name, c.content, c.content_hash
         FROM ai_chunks c
@@ -334,10 +440,15 @@ public sealed class PgVectorService : IAsyncDisposable
         LEFT JOIN ai_extraction_chunk_state s ON s.chunk_id = c.id AND s.stage = 'rules'
         WHERE w.name = $1
           AND (cardinality($2::text[]) = 0 OR p.name = ANY($2))
-          AND ({RuleCandidatePredicate})
-          AND (s.id IS NULL OR s.content_hash <> c.content_hash OR s.status = 'failed')
+          AND ({indexableFilePredicate})
+          AND ({predicate})
+          AND {statePredicate}
         ORDER BY
-          CASE WHEN s.status = 'failed' THEN 0 WHEN s.id IS NULL THEN 1 ELSE 2 END,
+          CASE
+            WHEN s.status = 'failed' THEN 0
+            WHEN s.id IS NULL OR s.content_hash <> c.content_hash THEN 1
+            ELSE 2
+          END,
           c.updated_at DESC
         {LimitClause(limit)};
         """;
@@ -346,10 +457,15 @@ public sealed class PgVectorService : IAsyncDisposable
         return await ReadExtractionChunksAsync(cmd, ct);
     }
 
-    public async Task<IReadOnlyList<ExtractionChunkResult>> GetChunksForKnowledgeExtractionAsync(string workspace, IReadOnlyList<string> projects, int? limit, CancellationToken ct = default)
+    public async Task<IReadOnlyList<ExtractionChunkResult>> GetChunksForKnowledgeExtractionAsync(string workspace, IReadOnlyList<string> projects, int? limit, bool semantic, bool refresh, CancellationToken ct = default)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
+        var predicate = semantic ? "TRUE" : KnowledgeCandidatePredicate;
+        var indexableFilePredicate = IndexableFilePredicate("c", "p");
+        var statePredicate = refresh
+            ? "TRUE"
+            : "(s.id IS NULL OR s.content_hash <> c.content_hash OR s.status = 'failed')";
         cmd.CommandText = $"""
         SELECT c.id, p.name, c.file_path, c.language, c.chunk_type, c.symbol_name, c.content, c.content_hash
         FROM ai_chunks c
@@ -359,10 +475,15 @@ public sealed class PgVectorService : IAsyncDisposable
         LEFT JOIN ai_extraction_chunk_state s ON s.chunk_id = c.id AND s.stage = 'knowledge'
         WHERE w.name = $1
           AND (cardinality($2::text[]) = 0 OR p.name = ANY($2))
-          AND ({KnowledgeCandidatePredicate})
-          AND (s.id IS NULL OR s.content_hash <> c.content_hash OR s.status = 'failed')
+          AND ({indexableFilePredicate})
+          AND ({predicate})
+          AND {statePredicate}
         ORDER BY
-          CASE WHEN s.status = 'failed' THEN 0 WHEN s.id IS NULL THEN 1 ELSE 2 END,
+          CASE
+            WHEN s.status = 'failed' THEN 0
+            WHEN s.id IS NULL OR s.content_hash <> c.content_hash THEN 1
+            ELSE 2
+          END,
           c.updated_at DESC
         {LimitClause(limit)};
         """;
@@ -536,19 +657,40 @@ public sealed class PgVectorService : IAsyncDisposable
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
+        var indexableFilePredicate = IndexableFilePredicate("c", "p");
         cmd.CommandText = $"""
         SELECT count(*) AS total_chunks,
                count(*) FILTER (WHERE {candidatePredicate}) AS candidate_chunks,
                count(*) FILTER (
                    WHERE ({candidatePredicate})
+                     AND s.status = 'processed'
+                     AND s.content_hash = c.content_hash
+               ) AS processed_candidate_chunks,
+               count(*) FILTER (
+                   WHERE ({candidatePredicate})
+                     AND s.id IS NULL
+               ) AS pending_candidate_chunks,
+               count(*) FILTER (
+                   WHERE ({candidatePredicate})
+                     AND s.status = 'failed'
+                     AND s.content_hash = c.content_hash
+               ) AS failed_candidate_chunks,
+               count(*) FILTER (
+                   WHERE ({candidatePredicate})
+                     AND s.id IS NOT NULL
+                     AND s.content_hash <> c.content_hash
+               ) AS changed_candidate_chunks,
+               count(*) FILTER (
+                   WHERE ({candidatePredicate})
                      AND (s.id IS NULL OR s.content_hash <> c.content_hash OR s.status = 'failed')
-               ) AS pending_candidate_chunks
+               ) AS actionable_candidate_chunks
         FROM ai_chunks c
         JOIN ai_projects p ON p.id = c.project_id
         JOIN ai_workspace_projects wp ON wp.project_id = p.id
         JOIN ai_workspaces w ON w.id = wp.workspace_id
         LEFT JOIN ai_extraction_chunk_state s ON s.chunk_id = c.id AND s.stage = $3
         WHERE w.name = $1
+          AND ({indexableFilePredicate})
           AND (cardinality($2::text[]) = 0 OR p.name = ANY($2));
         """;
         cmd.Parameters.AddWithValue(workspace);
@@ -557,12 +699,133 @@ public sealed class PgVectorService : IAsyncDisposable
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         await reader.ReadAsync(ct);
-        return new ExtractionStats(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+        return new ExtractionStats(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4),
+            reader.GetInt64(5),
+            reader.GetInt64(6));
     }
 
     private static string LimitClause(int? limit)
     {
         return limit is null ? "" : $"LIMIT {limit.Value}";
+    }
+
+    private static string EntityFrameworkMigrationFilePredicate(string chunkAlias)
+    {
+        return $"""
+        EXISTS (
+            SELECT 1
+            FROM ai_chunks ef_marker
+            WHERE ef_marker.project_id = {chunkAlias}.project_id
+              AND ef_marker.file_path = {chunkAlias}.file_path
+              AND ({EntityFrameworkMigrationContentPredicate("ef_marker")})
+        )
+        """;
+    }
+
+    private static string NonEntityFrameworkMigrationFilePredicate(string chunkAlias)
+    {
+        return $"NOT ({EntityFrameworkMigrationFilePredicate(chunkAlias)})";
+    }
+
+    private static string IndexableFilePredicate(string chunkAlias, string projectAlias)
+    {
+        return $"""
+        {NonEntityFrameworkMigrationFilePredicate(chunkAlias)}
+        AND NOT ({TestFilePredicate(chunkAlias, projectAlias)})
+        """;
+    }
+
+    private static string TestFilePredicate(string chunkAlias, string projectAlias)
+    {
+        return $"""
+        (
+            {projectAlias}.name ~* '(^|[._-])(test|tests|unittests|integrationtests|functionaltests|acceptancetests|spec|specs)([._-]|$)'
+            OR {projectAlias}.name ~* '(tests|specs)$'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/test/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/tests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/unittests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/unit.tests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/integrationtests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/integration.tests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/functionaltests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/functional.tests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/acceptancetests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/acceptance.tests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/spec/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%/specs/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%.tests/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ILIKE '%.specs/%'
+            OR replace({chunkAlias}.file_path, '\', '/') ~* '(tests|specs)\.cs$'
+            OR EXISTS (
+                SELECT 1
+                FROM ai_chunks test_marker
+                WHERE test_marker.project_id = {chunkAlias}.project_id
+                  AND test_marker.file_path = {chunkAlias}.file_path
+                  AND ({TestContentPredicate("test_marker")})
+            )
+        )
+        """;
+    }
+
+    private static string EntityFrameworkMigrationContentPredicate(string alias)
+    {
+        return $"""
+        {alias}.language = 'csharp'
+        AND (
+            {alias}.content ILIKE '%: Migration%'
+            OR {alias}.content ILIKE '%:Migration%'
+            OR {alias}.content ILIKE '%: ModelSnapshot%'
+            OR {alias}.content ILIKE '%:ModelSnapshot%'
+            OR {alias}.content ILIKE '%MigrationBuilder%'
+            OR {alias}.content ILIKE '%BuildTargetModel%'
+            OR {alias}.content ILIKE '%[Migration(%'
+            OR (
+                {alias}.content ILIKE '%[DbContext(%'
+                AND {alias}.content ILIKE '%ProductVersion%'
+            )
+        )
+        """;
+    }
+
+    private static string TestContentPredicate(string alias)
+    {
+        return $"""
+        (
+            {alias}.content ILIKE '%<IsTestProject>true</IsTestProject>%'
+            OR {alias}.content ILIKE '%Microsoft.NET.Test.Sdk%'
+            OR {alias}.content ILIKE '%MSTest.Sdk%'
+            OR {alias}.content ILIKE '%MSTest.TestFramework%'
+            OR {alias}.content ILIKE '%coverlet.collector%'
+            OR {alias}.content ILIKE '%PackageReference Include="xunit"%'
+            OR {alias}.content ILIKE '%PackageReference Include=''xunit''%'
+            OR {alias}.content ILIKE '%PackageReference Include="NUnit"%'
+            OR {alias}.content ILIKE '%PackageReference Include=''NUnit''%'
+            OR (
+                {alias}.language = 'csharp'
+                AND (
+                    {alias}.content ILIKE '%using Xunit%'
+                    OR {alias}.content ILIKE '%using NUnit.Framework%'
+                    OR {alias}.content ILIKE '%Microsoft.VisualStudio.TestTools.UnitTesting%'
+                    OR {alias}.content ILIKE '%[Fact%'
+                    OR {alias}.content ILIKE '%[Theory%'
+                    OR {alias}.content ILIKE '%[Test%'
+                    OR {alias}.content ILIKE '%[TestCase%'
+                    OR {alias}.content ILIKE '%[TestMethod%'
+                    OR {alias}.content ILIKE '%[TestClass%'
+                    OR {alias}.content ILIKE '%[TestFixture%'
+                    OR {alias}.content ILIKE '%[SetUp%'
+                    OR {alias}.content ILIKE '%[OneTimeSetUp%'
+                    OR {alias}.content ILIKE '%[TearDown%'
+                    OR {alias}.content ILIKE '%[OneTimeTearDown%'
+                )
+            )
+        )
+        """;
     }
 
     private static async Task<IReadOnlyList<ExtractionChunkResult>> ReadExtractionChunksAsync(NpgsqlCommand cmd, CancellationToken ct)
@@ -639,7 +902,14 @@ public sealed record ExtractionChunkResult(
     string Content,
     string ContentHash);
 
-public sealed record ExtractionStats(long TotalChunks, long CandidateChunks, long PendingCandidateChunks);
+public sealed record ExtractionStats(
+    long TotalChunks,
+    long CandidateChunks,
+    long ProcessedCandidateChunks,
+    long PendingCandidateChunks,
+    long FailedCandidateChunks,
+    long ChangedCandidateChunks,
+    long ActionableCandidateChunks);
 
 public sealed record ExtractedBusinessRule(
     Guid ChunkId,

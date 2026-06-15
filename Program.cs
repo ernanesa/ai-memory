@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.CommandLine.Invocation;
 using AiMemory.Commands;
 
 var root = new RootCommand("AI Memory Tool - local engineering memory with Ollama + PostgreSQL/pgvector");
@@ -6,6 +7,9 @@ var root = new RootCommand("AI Memory Tool - local engineering memory with Ollam
 var dbOption = new Option<string?>("--db", "PostgreSQL database name or connection string override");
 var ollamaOption = new Option<string?>("--ollama", "Ollama base URL override");
 var modelOption = new Option<string?>("--model", "Ollama embedding model override");
+var semanticOption = new Option<bool>("--semantic", "Use semantic extraction for rules/knowledge instead of only fast heuristics");
+var semanticModelOption = new Option<string?>("--semantic-model", "Ollama model used by semantic extraction");
+var refreshOption = new Option<bool>("--refresh", "Reprocess all matching rules/knowledge chunks regardless of extraction state");
 var workspaceOption = new Option<string?>("--workspace", "Workspace name override");
 var projectFilterOption = new Option<string?>("--project", "Project filter");
 var portOption = new Option<int>("--port", () => 5050, "Dashboard HTTP port");
@@ -17,19 +21,27 @@ index.AddArgument(indexStagesArg);
 index.AddOption(dbOption);
 index.AddOption(ollamaOption);
 index.AddOption(modelOption);
+index.AddOption(semanticOption);
+index.AddOption(semanticModelOption);
+index.AddOption(refreshOption);
 index.AddOption(workspaceOption);
 index.AddOption(projectFilterOption);
 index.AddOption(candidateLimitOption);
-index.SetHandler(
-    async (stages, project, workspace, db, ollama, model, candidateLimit) =>
-        await IndexCommand.RunAsync(stages, project, workspace, db, ollama, model, candidateLimit),
-    indexStagesArg,
-    projectFilterOption,
-    workspaceOption,
-    dbOption,
-    ollamaOption,
-    modelOption,
-    candidateLimitOption);
+index.SetHandler(async (InvocationContext context) =>
+{
+    var parseResult = context.ParseResult;
+    await IndexCommand.RunAsync(
+        parseResult.GetValueForArgument(indexStagesArg),
+        parseResult.GetValueForOption(projectFilterOption),
+        parseResult.GetValueForOption(workspaceOption),
+        parseResult.GetValueForOption(dbOption),
+        parseResult.GetValueForOption(ollamaOption),
+        parseResult.GetValueForOption(modelOption),
+        parseResult.GetValueForOption(semanticOption),
+        parseResult.GetValueForOption(semanticModelOption),
+        parseResult.GetValueForOption(refreshOption),
+        parseResult.GetValueForOption(candidateLimitOption));
+});
 
 var search = new Command("search", "Search engineering memory");
 var queryArg = new Argument<string>("query", "Search query");

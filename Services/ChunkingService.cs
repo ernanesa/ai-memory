@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 using AiMemory.Models;
 using Microsoft.CodeAnalysis.CSharp;
@@ -10,23 +11,32 @@ public sealed class ChunkingService
     private const int MaxChunkLength = 1_000;
 
     private static readonly HashSet<string> IgnoredDirs = new(StringComparer.OrdinalIgnoreCase)
-    { ".git", "bin", "obj", "node_modules", "dist", "coverage", "packages", ".idea", ".vs" };
+    { ".git", "bin", "obj", "node_modules", "dist", "coverage", "packages", ".idea", ".vs", ".vscode" };
 
     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
     { ".cs", ".csproj", ".sln", ".sql", ".json", ".md", ".yml", ".yaml", ".config", ".props", ".targets" };
 
     public IEnumerable<string> EnumerateFiles(string root)
     {
-        return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+        var testProjectDirectories = FindTestProjectDirectories(root).ToArray();
+        var files = EnumerateGitVisibleFiles(root) ?? Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories);
+        return files
             .Where(path => !path.Split(Path.DirectorySeparatorChar).Any(part => IgnoredDirs.Contains(part)))
+            .Where(path => !IsUnderAnyDirectory(path, testProjectDirectories))
             .Where(path => AllowedExtensions.Contains(Path.GetExtension(path)))
-            .Where(path => new FileInfo(path).Length < 512_000);
+            .Where(path => new FileInfo(path).Length < 512_000)
+            .Where(path => !ShouldSkipSourceFile(path));
     }
 
     public IEnumerable<CodeChunk> ChunkFile(string projectName, string root, string filePath)
     {
         var text = File.ReadAllText(filePath);
         var ext = Path.GetExtension(filePath).ToLowerInvariant();
+        if (ext == ".cs" && (IsEntityFrameworkMigrationSource(text) || IsTestSource(filePath, text)))
+        {
+            yield break;
+        }
+
         var relative = Path.GetRelativePath(root, filePath);
         var language = ext switch
         {
@@ -252,5 +262,246 @@ public sealed class ChunkingService
             if (part.Length >= 40) yield return part;
             start += length;
         }
+    }
+
+    private static bool ShouldSkipSourceFile(string filePath)
+    {
+        if (!Path.GetExtension(filePath).Equals(".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            var text = File.ReadAllText(filePath);
+            return IsEntityFrameworkMigrationSource(text) || IsTestSource(filePath, text);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<string> FindTestProjectDirectories(string root)
+    {
+        IEnumerable<string> projectFiles;
+        try
+        {
+            projectFiles = Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
+                .Where(path => !path.Split(Path.DirectorySeparatorChar).Any(part => IgnoredDirs.Contains(part)))
+                .ToArray();
+        }
+        catch
+        {
+            yield break;
+        }
+
+        foreach (var projectFile in projectFiles)
+        {
+            string text;
+            try
+            {
+                text = File.ReadAllText(projectFile);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (IsTestProject(projectFile, text))
+            {
+                yield return Path.GetDirectoryName(projectFile) ?? root;
+            }
+        }
+    }
+
+    private static bool IsUnderAnyDirectory(string filePath, IReadOnlyList<string> directories)
+    {
+        if (directories.Count == 0)
+        {
+            return false;
+        }
+
+        var fullPath = Path.GetFullPath(filePath);
+        return directories.Any(directory =>
+        {
+            var fullDirectory = Path.GetFullPath(directory);
+            var relative = Path.GetRelativePath(fullDirectory, fullPath);
+            return relative == "." ||
+                   (!relative.StartsWith("..", StringComparison.Ordinal) &&
+                    !Path.IsPathRooted(relative));
+        });
+    }
+
+    private static bool IsTestProject(string projectFile, string text)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(projectFile);
+        return LooksLikeTestProjectName(fileName) ||
+               text.Contains("<IsTestProject>true</IsTestProject>", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("MSTest.Sdk", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("MSTest.TestFramework", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("xunit", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("NUnit", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("coverlet.collector", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTestSource(string filePath, string text)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(filePath);
+        return LooksLikeTestProjectName(fileName) ||
+               HasTestPathSegment(filePath) ||
+               LooksLikeTestSource(text);
+    }
+
+    private static bool LooksLikeTestProjectName(string value)
+    {
+        return Regex.IsMatch(value, @"(^|[._-])(Test|Tests|UnitTests|IntegrationTests|FunctionalTests|AcceptanceTests|Spec|Specs)([._-]|$)", RegexOptions.IgnoreCase) ||
+               Regex.IsMatch(value, @"(Tests|Specs)$", RegexOptions.IgnoreCase);
+    }
+
+    private static bool HasTestPathSegment(string filePath)
+    {
+        return filePath
+            .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Any(segment => Regex.IsMatch(segment, @"^(Tests?|UnitTests|IntegrationTests|FunctionalTests|AcceptanceTests|Specs?)$", RegexOptions.IgnoreCase));
+    }
+
+    private static bool LooksLikeTestSource(string text)
+    {
+        if (text.Contains("Microsoft.VisualStudio.TestTools.UnitTesting", StringComparison.Ordinal) ||
+            text.Contains("using Xunit", StringComparison.Ordinal) ||
+            text.Contains("using NUnit.Framework", StringComparison.Ordinal) ||
+            text.Contains("namespace Xunit", StringComparison.Ordinal) ||
+            text.Contains("namespace NUnit", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return Regex.IsMatch(
+            text,
+            @"\[(?:Fact|Theory|Test|TestCase|TestMethod|TestClass|TestFixture|SetUp|OneTimeSetUp|TearDown|OneTimeTearDown)\b",
+            RegexOptions.IgnoreCase);
+    }
+
+    private static IEnumerable<string>? EnumerateGitVisibleFiles(string root)
+    {
+        try
+        {
+            var repositoryRoot = RunGit(root, "rev-parse", "--show-toplevel").Trim();
+            if (string.IsNullOrWhiteSpace(repositoryRoot) || !Directory.Exists(repositoryRoot))
+            {
+                return null;
+            }
+
+            var output = RunGit(root, "ls-files", "--cached", "--others", "--exclude-standard", "--full-name", "--", ".");
+            var files = output
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(path => Path.GetFullPath(Path.Combine(repositoryRoot, path)))
+                .Where(File.Exists)
+                .ToArray();
+
+            return files.Length == 0 ? null : files;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string RunGit(string workingDirectory, params string[] arguments)
+    {
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+
+        foreach (var argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+
+        process.Start();
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        return output;
+    }
+
+    private static bool IsEntityFrameworkMigrationSource(string text)
+    {
+        if (!LooksLikeEntityFrameworkMigrationSource(text))
+        {
+            return false;
+        }
+
+        try
+        {
+            var root = CSharpSyntaxTree.ParseText(text).GetCompilationUnitRoot();
+            var types = root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>();
+            foreach (var type in types)
+            {
+                if (HasBaseType(type, "Migration") || HasBaseType(type, "ModelSnapshot"))
+                {
+                    return true;
+                }
+            }
+
+            var attributes = root.DescendantNodes().OfType<AttributeSyntax>().Select(a => a.Name.ToString()).ToArray();
+            return attributes.Any(IsMigrationAttribute) && attributes.Any(IsDbContextAttribute);
+        }
+        catch
+        {
+            return Regex.IsMatch(text, @"class\s+[A-Za-z0-9_]+\s*:\s*(?:[A-Za-z0-9_.]+\.)?(?:Migration|ModelSnapshot)\b") ||
+                   (text.Contains("[Migration(", StringComparison.Ordinal) &&
+                    text.Contains("[DbContext(", StringComparison.Ordinal));
+        }
+    }
+
+    private static bool LooksLikeEntityFrameworkMigrationSource(string text)
+    {
+        return text.Contains("MigrationBuilder", StringComparison.Ordinal) ||
+               text.Contains("ModelSnapshot", StringComparison.Ordinal) ||
+               text.Contains("BuildTargetModel", StringComparison.Ordinal) ||
+               text.Contains("[Migration(", StringComparison.Ordinal) ||
+               text.Contains("Microsoft.EntityFrameworkCore.Migrations", StringComparison.Ordinal) ||
+               text.Contains(": Migration", StringComparison.Ordinal) ||
+               text.Contains(":Migration", StringComparison.Ordinal);
+    }
+
+    private static bool HasBaseType(BaseTypeDeclarationSyntax type, string name)
+    {
+        return type.BaseList?.Types.Any(baseType =>
+        {
+            var baseName = baseType.Type.ToString();
+            return baseName.Equals(name, StringComparison.Ordinal) ||
+                   baseName.EndsWith("." + name, StringComparison.Ordinal);
+        }) == true;
+    }
+
+    private static bool IsMigrationAttribute(string name)
+    {
+        return name.Equals("Migration", StringComparison.Ordinal) ||
+               name.Equals("MigrationAttribute", StringComparison.Ordinal) ||
+               name.EndsWith(".Migration", StringComparison.Ordinal) ||
+               name.EndsWith(".MigrationAttribute", StringComparison.Ordinal);
+    }
+
+    private static bool IsDbContextAttribute(string name)
+    {
+        return name.Equals("DbContext", StringComparison.Ordinal) ||
+               name.Equals("DbContextAttribute", StringComparison.Ordinal) ||
+               name.EndsWith(".DbContext", StringComparison.Ordinal) ||
+               name.EndsWith(".DbContextAttribute", StringComparison.Ordinal);
     }
 }

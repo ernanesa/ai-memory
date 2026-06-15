@@ -1,6 +1,8 @@
 using AiMemory.Services;
 using AiMemory.Configuration;
 using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace AiMemory.Commands;
@@ -21,6 +23,9 @@ public static class IndexCommand
         string? db,
         string? ollama,
         string? model,
+        bool semantic,
+        string? semanticModel,
+        bool refresh,
         int? candidateLimit)
     {
         var plan = ResolveStages(stages, ref project);
@@ -59,6 +64,14 @@ public static class IndexCommand
 
         Console.WriteLine($"Index stages: {string.Join(", ", plan.Value.Stages.Select(s => s.ToString().ToLowerInvariant()))}");
         Console.WriteLine($"Workspace: {workspace.Name}");
+        if (semantic && (plan.Value.Stages.Contains(IndexStage.Rules) || plan.Value.Stages.Contains(IndexStage.Knowledge)))
+        {
+            Console.WriteLine($"Semantic extraction: enabled ({ConfigService.ResolveSemanticModel(config, semanticModel)})");
+        }
+        if (refresh && (plan.Value.Stages.Contains(IndexStage.Rules) || plan.Value.Stages.Contains(IndexStage.Knowledge)))
+        {
+            Console.WriteLine("Extraction refresh: enabled");
+        }
         if (!string.IsNullOrWhiteSpace(project))
         {
             Console.WriteLine($"Project: {project}");
@@ -72,12 +85,12 @@ public static class IndexCommand
 
         if (plan.Value.Stages.Contains(IndexStage.Rules))
         {
-            await IndexRulesAsync(projects, workspace.Name, config, db, ollama, model, candidateLimit);
+            await IndexRulesAsync(projects, workspace.Name, config, db, ollama, model, semantic, semanticModel, refresh, candidateLimit);
         }
 
         if (plan.Value.Stages.Contains(IndexStage.Knowledge))
         {
-            await IndexKnowledgeAsync(projects, workspace.Name, config, db, ollama, model, candidateLimit);
+            await IndexKnowledgeAsync(projects, workspace.Name, config, db, ollama, model, semantic, semanticModel, refresh, candidateLimit);
         }
     }
 
@@ -94,6 +107,23 @@ public static class IndexCommand
             ConfigService.ResolveOllamaBaseUrl(config, ollama),
             ConfigService.ResolveEmbeddingModel(config, model));
         await using var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
+        var removedGeneratedChunks = await pg.DeleteEntityFrameworkMigrationChunksAsync(
+            workspaceName,
+            projects.Select(p => p.Name).ToArray());
+        if (removedGeneratedChunks > 0)
+        {
+            Console.WriteLine($"Removed existing Entity Framework migration chunks: {removedGeneratedChunks:N0}");
+            Console.WriteLine();
+        }
+
+        var removedTestChunks = await pg.DeleteTestChunksAsync(
+            workspaceName,
+            projects.Select(p => p.Name).ToArray());
+        if (removedTestChunks > 0)
+        {
+            Console.WriteLine($"Removed existing test chunks: {removedTestChunks:N0}");
+            Console.WriteLine();
+        }
 
         foreach (var configuredProject in projects)
         {
@@ -106,7 +136,7 @@ public static class IndexCommand
 
             Console.WriteLine($"Indexing chunks for {workspaceName}/{configuredProject.Name}: {root}");
             var files = chunker.EnumerateFiles(root).ToList();
-            var progress = new ChunkIndexProgressReporter("chunk files", files.Count);
+            using var progress = new ChunkIndexProgressReporter("chunk files", files.Count);
             var indexedChunks = 0;
 
             foreach (var file in files)
@@ -147,36 +177,74 @@ public static class IndexCommand
         string? db,
         string? ollama,
         string? model,
+        bool semantic,
+        string? semanticModel,
+        bool refresh,
         int? candidateLimit)
     {
         Console.WriteLine($"Indexing rules for workspace '{workspaceName}' ({projects.Count} project(s)).");
+        if (semantic)
+        {
+            Console.WriteLine("  semantic mode: using semantic extraction for selected chunks.");
+        }
+        if (refresh)
+        {
+            Console.WriteLine("  refresh mode: reprocessing matching chunks even when already processed.");
+        }
+        var ollamaBaseUrl = ConfigService.ResolveOllamaBaseUrl(config, ollama);
         await using var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
         var ollamaService = new OllamaService(
-            ConfigService.ResolveOllamaBaseUrl(config, ollama),
+            ollamaBaseUrl,
             ConfigService.ResolveEmbeddingModel(config, model));
+        var semanticService = semantic
+            ? new OllamaService(ollamaBaseUrl, ConfigService.ResolveSemanticModel(config, semanticModel))
+            : null;
 
         var projectNames = projects.Select(p => p.Name).ToArray();
-        var stats = await pg.GetRuleExtractionStatsAsync(workspaceName, projectNames);
-        var chunks = await pg.GetChunksForRuleExtractionAsync(workspaceName, projectNames, candidateLimit);
+        var stats = await pg.GetRuleExtractionStatsAsync(workspaceName, projectNames, semantic);
+        var chunks = await pg.GetChunksForRuleExtractionAsync(workspaceName, projectNames, candidateLimit, semantic, refresh);
         var inserted = 0;
         var updated = 0;
         var skipped = 0;
         var extracted = 0;
 
-        PrintCandidateScope(stats, chunks.Count, candidateLimit);
+        PrintCandidateScope(stats, chunks.Count, candidateLimit, refresh);
 
-        var progress = new ProgressReporter("rule chunks", chunks.Count);
+        using var progress = new ProgressReporter("rule chunks", chunks.Count);
         foreach (var chunk in chunks)
         {
+            progress.BeforeItem($"{chunk.File}{(chunk.Symbol is null ? "" : $"::{chunk.Symbol}")}");
             var chunkFailed = false;
             var chunkError = "";
-            var candidates = ExtractBusinessRules(chunk).ToList();
-            extracted += candidates.Count;
+            var candidates = new List<ExtractedBusinessRule>();
+            try
+            {
+                candidates.AddRange(ExtractBusinessRules(chunk));
+                if (semanticService is not null)
+                {
+                    candidates.AddRange(await ExtractSemanticBusinessRulesAsync(semanticService, chunk));
+                }
+
+                candidates = DeduplicateBusinessRules(candidates).ToList();
+                extracted += candidates.Count;
+            }
+            catch (Exception ex)
+            {
+                chunkFailed = true;
+                chunkError = ex.Message;
+                progress.WriteMessage($"  failed rule extraction {chunk.File}: {ex.Message}");
+            }
+
+            if (chunkFailed)
+            {
+                await pg.MarkExtractionChunkFailedAsync(chunk.Id, "rules", chunk.ContentHash, chunkError);
+                progress.AfterItem(inserted, updated, skipped);
+                continue;
+            }
 
             if (candidates.Count == 0)
             {
                 await pg.MarkExtractionChunkProcessedAsync(chunk.Id, "rules", chunk.ContentHash);
-                progress.BeforeItem($"{chunk.File}{(chunk.Symbol is null ? "" : $"::{chunk.Symbol}")}");
                 progress.AfterItem(inserted, updated, skipped);
                 continue;
             }
@@ -185,7 +253,7 @@ public static class IndexCommand
             {
                 foreach (var candidate in candidates)
                 {
-                    progress.BeforeItem($"{candidate.SourceFile}{(candidate.SymbolName is null ? "" : $"::{candidate.SymbolName}")}");
+                    progress.UpdateCurrent($"{candidate.SourceFile}{(candidate.SymbolName is null ? "" : $"::{candidate.SymbolName}")}");
                     var embedding = await ollamaService.EmbedAsync($"{candidate.Title}\n{candidate.Description}\n{candidate.Evidence}");
                     var result = await pg.UpsertBusinessRuleCandidateAsync(candidate, embedding);
                     if (result.Action == "inserted") inserted++;
@@ -198,7 +266,7 @@ public static class IndexCommand
                 chunkFailed = true;
                 chunkError = ex.Message;
                 skipped += candidates.Count;
-                Console.WriteLine($"  failed rule chunk {chunk.File}: {ex.Message}");
+                progress.WriteMessage($"  failed rule chunk {chunk.File}: {ex.Message}");
             }
 
             if (chunkFailed)
@@ -228,36 +296,74 @@ public static class IndexCommand
         string? db,
         string? ollama,
         string? model,
+        bool semantic,
+        string? semanticModel,
+        bool refresh,
         int? candidateLimit)
     {
         Console.WriteLine($"Indexing knowledge for workspace '{workspaceName}' ({projects.Count} project(s)).");
+        if (semantic)
+        {
+            Console.WriteLine("  semantic mode: using semantic extraction for selected chunks.");
+        }
+        if (refresh)
+        {
+            Console.WriteLine("  refresh mode: reprocessing matching chunks even when already processed.");
+        }
+        var ollamaBaseUrl = ConfigService.ResolveOllamaBaseUrl(config, ollama);
         await using var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
         var ollamaService = new OllamaService(
-            ConfigService.ResolveOllamaBaseUrl(config, ollama),
+            ollamaBaseUrl,
             ConfigService.ResolveEmbeddingModel(config, model));
+        var semanticService = semantic
+            ? new OllamaService(ollamaBaseUrl, ConfigService.ResolveSemanticModel(config, semanticModel))
+            : null;
 
         var projectNames = projects.Select(p => p.Name).ToArray();
-        var stats = await pg.GetKnowledgeExtractionStatsAsync(workspaceName, projectNames);
-        var chunks = await pg.GetChunksForKnowledgeExtractionAsync(workspaceName, projectNames, candidateLimit);
+        var stats = await pg.GetKnowledgeExtractionStatsAsync(workspaceName, projectNames, semantic);
+        var chunks = await pg.GetChunksForKnowledgeExtractionAsync(workspaceName, projectNames, candidateLimit, semantic, refresh);
         var inserted = 0;
         var updated = 0;
         var skipped = 0;
         var extracted = 0;
 
-        PrintCandidateScope(stats, chunks.Count, candidateLimit);
+        PrintCandidateScope(stats, chunks.Count, candidateLimit, refresh);
 
-        var progress = new ProgressReporter("knowledge chunks", chunks.Count);
+        using var progress = new ProgressReporter("knowledge chunks", chunks.Count);
         foreach (var chunk in chunks)
         {
+            progress.BeforeItem($"{chunk.File}{(chunk.Symbol is null ? "" : $"::{chunk.Symbol}")}");
             var chunkFailed = false;
             var chunkError = "";
-            var candidates = ExtractKnowledge(chunk).ToList();
-            extracted += candidates.Count;
+            var candidates = new List<ExtractedKnowledge>();
+            try
+            {
+                candidates.AddRange(ExtractKnowledge(chunk));
+                if (semanticService is not null)
+                {
+                    candidates.AddRange(await ExtractSemanticKnowledgeAsync(semanticService, chunk));
+                }
+
+                candidates = DeduplicateKnowledge(candidates).ToList();
+                extracted += candidates.Count;
+            }
+            catch (Exception ex)
+            {
+                chunkFailed = true;
+                chunkError = ex.Message;
+                progress.WriteMessage($"  failed knowledge extraction {chunk.File}: {ex.Message}");
+            }
+
+            if (chunkFailed)
+            {
+                await pg.MarkExtractionChunkFailedAsync(chunk.Id, "knowledge", chunk.ContentHash, chunkError);
+                progress.AfterItem(inserted, updated, skipped);
+                continue;
+            }
 
             if (candidates.Count == 0)
             {
                 await pg.MarkExtractionChunkProcessedAsync(chunk.Id, "knowledge", chunk.ContentHash);
-                progress.BeforeItem($"{chunk.File}{(chunk.Symbol is null ? "" : $"::{chunk.Symbol}")}");
                 progress.AfterItem(inserted, updated, skipped);
                 continue;
             }
@@ -266,7 +372,7 @@ public static class IndexCommand
             {
                 foreach (var candidate in candidates)
                 {
-                    progress.BeforeItem($"{candidate.Source}{(candidate.SymbolName is null ? "" : $"::{candidate.SymbolName}")}");
+                    progress.UpdateCurrent($"{candidate.Source}{(candidate.SymbolName is null ? "" : $"::{candidate.SymbolName}")}");
                     var embedding = await ollamaService.EmbedAsync($"{candidate.Kind}\n{candidate.Title}\n{candidate.Content}\n{candidate.Evidence}");
                     var result = await pg.UpsertKnowledgeCandidateAsync(candidate, embedding);
                     if (result.Action == "inserted") inserted++;
@@ -279,7 +385,7 @@ public static class IndexCommand
                 chunkFailed = true;
                 chunkError = ex.Message;
                 skipped += candidates.Count;
-                Console.WriteLine($"  failed knowledge chunk {chunk.File}: {ex.Message}");
+                progress.WriteMessage($"  failed knowledge chunk {chunk.File}: {ex.Message}");
             }
 
             if (chunkFailed)
@@ -383,6 +489,157 @@ public static class IndexCommand
         }
     }
 
+    private static async Task<IReadOnlyList<ExtractedBusinessRule>> ExtractSemanticBusinessRulesAsync(
+        OllamaService semanticService,
+        ExtractionChunkResult chunk)
+    {
+        var json = await semanticService.GenerateJsonAsync(BuildSemanticRulesPrompt(chunk));
+        var payload = JsonSerializer.Deserialize<SemanticRulesResponse>(json, JsonOptions);
+        if (payload?.Rules is null || payload.Rules.Count == 0)
+        {
+            return [];
+        }
+
+        var rules = new List<ExtractedBusinessRule>();
+        foreach (var item in payload.Rules)
+        {
+            var title = NormalizeSentence(item.Title ?? "");
+            var description = NormalizeSentence(item.Description ?? "");
+            var evidence = NormalizeEvidence(item.Evidence ?? "");
+            if (title.Length < 8 ||
+                description.Length < 12 ||
+                !EvidenceExists(chunk.Content, evidence) ||
+                !LooksLikeSemanticBusinessRule(title, description, evidence))
+            {
+                continue;
+            }
+
+            var confidence = NormalizeConfidence(item.Confidence, 0.72m);
+            var contentHash = HashService.Sha256($"{chunk.Project}|rule|{NormalizeKey(title)}");
+            rules.Add(new ExtractedBusinessRule(
+                chunk.Id,
+                ToTitle(title, 90),
+                description.EndsWith('.') ? description : description + ".",
+                chunk.File,
+                chunk.Symbol,
+                Truncate(evidence, 500),
+                confidence,
+                contentHash));
+        }
+
+        return rules;
+    }
+
+    private static async Task<IReadOnlyList<ExtractedKnowledge>> ExtractSemanticKnowledgeAsync(
+        OllamaService semanticService,
+        ExtractionChunkResult chunk)
+    {
+        var json = await semanticService.GenerateJsonAsync(BuildSemanticKnowledgePrompt(chunk));
+        var payload = JsonSerializer.Deserialize<SemanticKnowledgeResponse>(json, JsonOptions);
+        if (payload?.Knowledge is null || payload.Knowledge.Count == 0)
+        {
+            return [];
+        }
+
+        var records = new List<ExtractedKnowledge>();
+        foreach (var item in payload.Knowledge)
+        {
+            var kind = NormalizeKnowledgeKind(item.Kind);
+            var title = NormalizeSentence(item.Title ?? "");
+            var content = NormalizeSentence(item.Content ?? "");
+            var evidence = NormalizeEvidence(item.Evidence ?? "");
+            if (title.Length < 8 || content.Length < 12 || !EvidenceExists(chunk.Content, evidence))
+            {
+                continue;
+            }
+
+            var fullTitle = title.StartsWith(chunk.Project + ":", StringComparison.OrdinalIgnoreCase)
+                ? title
+                : $"{chunk.Project}: {title}";
+            var confidence = NormalizeConfidence(item.Confidence, 0.70m);
+            var contentHash = HashService.Sha256($"{chunk.Project}|knowledge|{kind}|{NormalizeKey(title)}|{chunk.File}");
+            records.Add(new ExtractedKnowledge(
+                chunk.Id,
+                kind,
+                ToTitle(fullTitle, 140),
+                content.EndsWith('.') ? content : content + ".",
+                chunk.File,
+                chunk.Symbol,
+                Truncate(evidence, 500),
+                confidence,
+                contentHash));
+        }
+
+        return records;
+    }
+
+    private static IEnumerable<ExtractedBusinessRule> DeduplicateBusinessRules(IEnumerable<ExtractedBusinessRule> rules)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rule in rules.OrderByDescending(r => r.Confidence))
+        {
+            if (seen.Add(NormalizeKey(rule.Title)))
+            {
+                yield return rule;
+            }
+        }
+    }
+
+    private static IEnumerable<ExtractedKnowledge> DeduplicateKnowledge(IEnumerable<ExtractedKnowledge> records)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var record in records.OrderByDescending(r => r.Confidence))
+        {
+            if (seen.Add($"{NormalizeKey(record.Kind)}|{NormalizeKey(record.Title)}"))
+            {
+                yield return record;
+            }
+        }
+    }
+
+    private static string BuildSemanticRulesPrompt(ExtractionChunkResult chunk)
+    {
+        return string.Join(Environment.NewLine, [
+            "You extract business rules from source code and documentation.",
+            "Return JSON only. Use this exact shape:",
+            """{"rules":[{"title":"short rule title","description":"business meaning in Portuguese","evidence":"exact excerpt copied from the chunk","confidence":0.0}]}""",
+            "Only include real product/domain constraints, validations, permissions, state transitions, eligibility rules or required data.",
+            "Do not include constants, GUIDs, method signatures, repository/query capabilities, DTO shapes, mappings, configuration, or technical implementation details as business rules.",
+            "Reject facts phrased as 'permite obter', 'busca', 'retorna', 'cria lista', 'codigo constante' unless they impose a domain restriction, obligation or decision.",
+            "Every evidence value must be copied exactly from the chunk. If there is no exact evidence, return {\"rules\":[]}.",
+            "",
+            $"Project: {chunk.Project}",
+            $"File: {chunk.File}",
+            $"Language: {chunk.Language}",
+            $"Chunk type: {chunk.ChunkType}",
+            $"Symbol: {chunk.Symbol}",
+            "",
+            "Chunk:",
+            chunk.Content
+        ]);
+    }
+
+    private static string BuildSemanticKnowledgePrompt(ExtractionChunkResult chunk)
+    {
+        return string.Join(Environment.NewLine, [
+            "You extract technical engineering knowledge from source code and documentation.",
+            "Return JSON only. Use this exact shape:",
+            """{"knowledge":[{"kind":"integration|pattern|technical_risk|architecture|configuration","title":"short technical fact","content":"technical meaning in Portuguese","evidence":"exact excerpt copied from the chunk","confidence":0.0}]}""",
+            "Include integrations, frameworks, architectural patterns, configuration, infrastructure, persistence, messaging, authentication and explicit technical risks.",
+            "Do not include business rules here.",
+            "Every evidence value must be copied exactly from the chunk. If there is no exact evidence, return {\"knowledge\":[]}.",
+            "",
+            $"Project: {chunk.Project}",
+            $"File: {chunk.File}",
+            $"Language: {chunk.Language}",
+            $"Chunk type: {chunk.ChunkType}",
+            $"Symbol: {chunk.Symbol}",
+            "",
+            "Chunk:",
+            chunk.Content
+        ]);
+    }
+
     private static IEnumerable<string> GetRelevantLines(string content)
     {
         return content
@@ -456,14 +713,104 @@ public static class IndexCommand
                value.Contains("Permite", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool LooksLikeSemanticBusinessRule(string title, string description, string evidence)
+    {
+        var combined = NormalizeKey($"{title} {description} {evidence}");
+        if (LooksLikeTechnicalFact(combined))
+        {
+            return false;
+        }
+
+        return combined.Contains("nao pode", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("não pode", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("deve", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("obrigator", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("invalid", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("inválid", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("invalido", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("bloque", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("cancel", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("venc", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("eleg", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("permitid", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("proibid", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("restri", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("valid", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("status", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("regra", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("permiss", StringComparison.OrdinalIgnoreCase) ||
+               combined.Contains("limite", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeTechnicalFact(string normalized)
+    {
+        return normalized.Contains("codigo corretor", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("código corretor", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("codigo representante", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("código representante", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("identificador unico", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("identificador único", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("const string", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("public const", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("permite obter", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("permite buscar", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("permite listar", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("obtencao de", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("obtenção de", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("busca de", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("consulta de", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("retorna ", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("criação de lista", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("criacao de lista", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("cria uma lista", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("ienumerable", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("task<ienumerable", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string NormalizeSentence(string value)
     {
         return Regex.Replace(value, @"\s+", " ").Trim().Trim('"', '\'', '.', ';', ',');
     }
 
+    private static string NormalizeEvidence(string value)
+    {
+        return Regex.Replace(value, @"\s+", " ").Trim().Trim('"', '\'');
+    }
+
     private static string NormalizeKey(string value)
     {
         return Regex.Replace(value.ToLowerInvariant(), @"\s+", " ").Trim();
+    }
+
+    private static bool EvidenceExists(string content, string evidence)
+    {
+        if (evidence.Length < 8)
+        {
+            return false;
+        }
+
+        return content.Contains(evidence, StringComparison.OrdinalIgnoreCase) ||
+               content.Contains(NormalizeSentence(evidence), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static decimal NormalizeConfidence(decimal? value, decimal fallback)
+    {
+        var confidence = value is > 0 ? value.Value : fallback;
+        return Math.Clamp(confidence, 0.10m, 0.95m);
+    }
+
+    private static string NormalizeKnowledgeKind(string? value)
+    {
+        var normalized = NormalizeKey(value ?? "");
+        return normalized switch
+        {
+            "integration" => "integration",
+            "pattern" => "pattern",
+            "technical_risk" => "technical_risk",
+            "architecture" => "architecture",
+            "configuration" => "configuration",
+            _ => "technical"
+        };
     }
 
     private static string ToTitle(string value, int maxLength)
@@ -478,15 +825,30 @@ public static class IndexCommand
         return normalized.Length <= maxLength ? normalized : normalized[..maxLength].TrimEnd() + "...";
     }
 
-    private static void PrintCandidateScope(ExtractionStats stats, int selectedCandidateChunks, int? candidateLimit)
+    private static void PrintCandidateScope(ExtractionStats stats, int selectedCandidateChunks, int? candidateLimit, bool refresh)
     {
-        Console.WriteLine($"  total chunks in scope: {stats.TotalChunks:N0}");
-        Console.WriteLine($"  matching candidate chunks before limit: {stats.CandidateChunks:N0}");
-        Console.WriteLine($"  pending candidate chunks: {stats.PendingCandidateChunks:N0}");
-        Console.WriteLine(candidateLimit is null
-            ? "  candidate limit: none"
-            : $"  candidate limit: {candidateLimit.Value:N0}");
-        Console.WriteLine($"  candidate chunks selected: {selectedCandidateChunks:N0}");
+        var rows = new (string Metric, string Value)[]
+        {
+            ("total chunks in scope", stats.TotalChunks.ToString("N0")),
+            ("matching candidates", stats.CandidateChunks.ToString("N0")),
+            ("already processed", stats.ProcessedCandidateChunks.ToString("N0")),
+            ("pending new", stats.PendingCandidateChunks.ToString("N0")),
+            ("failed", stats.FailedCandidateChunks.ToString("N0")),
+            ("changed hash", stats.ChangedCandidateChunks.ToString("N0")),
+            ("actionable", stats.ActionableCandidateChunks.ToString("N0")),
+            ("selected", selectedCandidateChunks.ToString("N0")),
+            ("refresh", refresh ? "enabled" : "disabled"),
+            ("candidate limit", candidateLimit is null ? "none" : candidateLimit.Value.ToString("N0"))
+        };
+
+        Console.WriteLine("  Candidate scope");
+        Console.WriteLine($"  {"Metric",-27} {"Value",12}");
+        Console.WriteLine($"  {new string('-', 27)} {new string('-', 12)}");
+        foreach (var row in rows)
+        {
+            Console.WriteLine($"  {row.Metric,-27} {row.Value,12}");
+        }
+
         if (candidateLimit is null && selectedCandidateChunks > 0)
         {
             WriteWarning(
@@ -559,161 +921,474 @@ public static class IndexCommand
         Knowledge
     }
 
-    private sealed class ProgressReporter
+    private sealed class ProgressReporter : IDisposable
     {
-        private const int ItemInterval = 25;
-        private static readonly TimeSpan TimeInterval = TimeSpan.FromSeconds(5);
-
-        private readonly string _label;
-        private readonly int _total;
-        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
-        private TimeSpan _lastReport = TimeSpan.Zero;
-        private int _processed;
-        private string _current = "";
+        private readonly ProgressPanel _panel;
 
         public ProgressReporter(string label, int total)
         {
-            _label = label;
-            _total = total;
-            if (total == 0)
-            {
-                Console.WriteLine($"  processing {label}: no candidates");
-            }
-            else
-            {
-                Console.WriteLine($"  processing {label}: 0/{total:N0} (0%)");
-            }
+            _panel = new ProgressPanel(label, total, "no candidates", hasMutationCounts: true);
         }
 
-        public void BeforeItem(string current)
-        {
-            _current = TruncateForProgress(current);
-        }
+        public void BeforeItem(string current) => _panel.BeforeItem(current);
 
-        public void AfterItem(int inserted, int updated, int skipped)
-        {
-            _processed++;
-            if (_processed == _total ||
-                _processed % ItemInterval == 0 ||
-                _stopwatch.Elapsed - _lastReport >= TimeInterval)
-            {
-                Report(inserted, updated, skipped);
-            }
-        }
+        public void UpdateCurrent(string current) => _panel.UpdateCurrent(current);
 
-        public void Complete(int inserted, int updated, int skipped)
-        {
-            if (_total == 0)
-            {
-                return;
-            }
+        public void AfterItem(int inserted, int updated, int skipped) =>
+            _panel.AfterItem(inserted, updated, skipped, indexedChunks: null);
 
-            if (_processed != _total)
-            {
-                Report(inserted, updated, skipped);
-            }
-        }
+        public void WriteMessage(string message) => _panel.WriteMessage(message);
 
-        private void Report(int inserted, int updated, int skipped)
-        {
-            _lastReport = _stopwatch.Elapsed;
-            var percent = _total == 0 ? 100 : (int)Math.Round(_processed * 100d / _total);
-            var rate = _stopwatch.Elapsed.TotalSeconds <= 0 ? 0 : _processed / _stopwatch.Elapsed.TotalSeconds;
-            var remaining = rate <= 0 || _processed >= _total
-                ? "done"
-                : $"eta {TimeSpan.FromSeconds((_total - _processed) / rate):hh\\:mm\\:ss}";
+        public void Complete(int inserted, int updated, int skipped) =>
+            _panel.Complete(inserted, updated, skipped, indexedChunks: null);
 
-            Console.WriteLine(
-                $"  processing {_label}: {_processed:N0}/{_total:N0} ({percent}%) " +
-                $"inserted {inserted:N0}, updated {updated:N0}, skipped {skipped:N0}, {remaining}" +
-                $"{(string.IsNullOrWhiteSpace(_current) ? "" : $" | {_current}")}");
-        }
-
-        private static string TruncateForProgress(string value)
-        {
-            value = Regex.Replace(value, @"\s+", " ").Trim();
-            return value.Length <= 100 ? value : value[..97] + "...";
-        }
+        public void Dispose() => _panel.Dispose();
     }
 
-    private sealed class ChunkIndexProgressReporter
+    private sealed class ChunkIndexProgressReporter : IDisposable
     {
-        private static readonly TimeSpan TimeInterval = TimeSpan.FromSeconds(5);
-
-        private readonly string _label;
-        private readonly int _total;
-        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
-        private TimeSpan _lastReport = TimeSpan.Zero;
-        private int _processed;
-        private string _current = "";
+        private readonly ProgressPanel _panel;
 
         public ChunkIndexProgressReporter(string label, int total)
         {
+            _panel = new ProgressPanel(label, total, "no files", hasMutationCounts: false);
+        }
+
+        public void BeforeItem(string current) => _panel.BeforeItem(current);
+
+        public void AfterItem(int indexedChunks) =>
+            _panel.AfterItem(inserted: 0, updated: 0, skipped: 0, indexedChunks);
+
+        public void AfterChunk(int indexedChunks) => _panel.UpdateCounts(0, 0, 0, indexedChunks);
+
+        public void Complete(int indexedChunks) =>
+            _panel.Complete(inserted: 0, updated: 0, skipped: 0, indexedChunks);
+
+        public void Dispose() => _panel.Dispose();
+    }
+
+    private sealed class ProgressPanel : IDisposable
+    {
+        private static readonly TimeSpan RenderInterval = TimeSpan.FromSeconds(1);
+        private const int PanelLines = 4;
+
+        private readonly object _gate = new();
+        private readonly string _label;
+        private readonly int _total;
+        private readonly bool _hasMutationCounts;
+        private readonly bool _interactive;
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private readonly EtaEstimator _eta = new();
+        private readonly Timer? _timer;
+
+        private TimeSpan _lastFallbackReport = TimeSpan.Zero;
+        private int _processed;
+        private int _inserted;
+        private int _updated;
+        private int _skipped;
+        private int _indexedChunks;
+        private bool _rendered;
+        private bool _disposed;
+        private string _current = "";
+
+        public ProgressPanel(string label, int total, string emptyMessage, bool hasMutationCounts)
+        {
             _label = label;
             _total = total;
+            _hasMutationCounts = hasMutationCounts;
+            _interactive = IsInteractiveConsole();
+
             if (total == 0)
             {
-                Console.WriteLine($"  processing {label}: no files");
+                Console.WriteLine($"  processing {label}: {emptyMessage}");
+                return;
+            }
+
+            if (_interactive)
+            {
+                RenderLive();
+                _timer = new Timer(_ => RenderFromTimer(), null, RenderInterval, RenderInterval);
             }
             else
             {
-                Console.WriteLine($"  processing {label}: 0/{total:N0} (0%)");
+                WriteFallback(force: true);
             }
         }
 
         public void BeforeItem(string current)
         {
-            _current = TruncateForProgress(current);
-        }
-
-        public void AfterItem(int indexedChunks)
-        {
-            _processed++;
-            Report(indexedChunks);
-        }
-
-        public void AfterChunk(int indexedChunks)
-        {
-            if (_stopwatch.Elapsed - _lastReport >= TimeInterval)
+            lock (_gate)
             {
-                Report(indexedChunks);
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _eta.StartItem(_stopwatch.Elapsed);
+                _current = TruncateForProgress(current);
             }
         }
 
-        public void Complete(int indexedChunks)
+        public void UpdateCurrent(string current)
         {
-            if (_total == 0)
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _current = TruncateForProgress(current);
+            }
+        }
+
+        public void UpdateCounts(int inserted, int updated, int skipped, int? indexedChunks)
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _inserted = inserted;
+                _updated = updated;
+                _skipped = skipped;
+                if (indexedChunks is { } chunks)
+                {
+                    _indexedChunks = chunks;
+                }
+
+                WriteFallback(force: false);
+            }
+        }
+
+        public void AfterItem(int inserted, int updated, int skipped, int? indexedChunks)
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _eta.FinishItem(_stopwatch.Elapsed);
+                _processed++;
+                _inserted = inserted;
+                _updated = updated;
+                _skipped = skipped;
+                if (indexedChunks is { } chunks)
+                {
+                    _indexedChunks = chunks;
+                }
+
+                WriteFallback(force: _processed >= _total);
+            }
+        }
+
+        public void WriteMessage(string message)
+        {
+            lock (_gate)
+            {
+                if (_interactive && _rendered)
+                {
+                    ClearLivePanel();
+                }
+
+                Console.WriteLine(message);
+
+                if (_interactive && !_disposed && _total > 0)
+                {
+                    RenderLive();
+                }
+            }
+        }
+
+        public void Complete(int inserted, int updated, int skipped, int? indexedChunks)
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _inserted = inserted;
+                _updated = updated;
+                _skipped = skipped;
+                if (indexedChunks is { } chunks)
+                {
+                    _indexedChunks = chunks;
+                }
+
+                if (_total > 0)
+                {
+                    if (_interactive)
+                    {
+                        RenderLive();
+                    }
+                    else
+                    {
+                        WriteFallback(force: true);
+                    }
+                }
+            }
+
+            Dispose();
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+            }
+
+            _timer?.Dispose();
+        }
+
+        private void RenderFromTimer()
+        {
+            lock (_gate)
+            {
+                if (_disposed || !_interactive || _total == 0)
+                {
+                    return;
+                }
+
+                RenderLive();
+            }
+        }
+
+        private void RenderLive()
+        {
+            if (_rendered)
+            {
+                Console.Write($"\u001b[{PanelLines}F");
+            }
+
+            foreach (var line in BuildLines())
+            {
+                Console.Write("\u001b[2K");
+                Console.WriteLine(line);
+            }
+
+            _rendered = true;
+        }
+
+        private void ClearLivePanel()
+        {
+            Console.Write($"\u001b[{PanelLines}F");
+            for (var i = 0; i < PanelLines; i++)
+            {
+                Console.Write("\u001b[2K");
+                Console.WriteLine();
+            }
+            Console.Write($"\u001b[{PanelLines}F");
+            _rendered = false;
+        }
+
+        private void WriteFallback(bool force)
+        {
+            if (_interactive)
             {
                 return;
             }
 
-            if (_processed != _total)
+            if (!force && _stopwatch.Elapsed - _lastFallbackReport < RenderInterval)
             {
-                Report(indexedChunks);
+                return;
+            }
+
+            _lastFallbackReport = _stopwatch.Elapsed;
+            Console.WriteLine(BuildSingleLine());
+        }
+
+        private string[] BuildLines()
+        {
+            var progress = FormatProgress();
+            var elapsed = EtaEstimator.FormatDuration(_stopwatch.Elapsed);
+            var eta = _eta.Format(_processed, _total, _stopwatch.Elapsed);
+            var rate = FormatRate();
+            var countsHeader = _hasMutationCounts
+                ? "Inserted   Updated    Skipped"
+                : "Chunks";
+            var counts = _hasMutationCounts
+                ? $"{_inserted,8:N0}   {_updated,7:N0}   {_skipped,7:N0}"
+                : $"{_indexedChunks,6:N0}";
+            var width = GetConsoleWidth();
+
+            return
+            [
+                Fit($"  {"Stage",-18} {"Progress",-19} {"Elapsed",-10} {"ETA",-14} {countsHeader}", width),
+                Fit($"  {_label,-18} {progress,-19} {elapsed,-10} {eta,-14} {counts}", width),
+                Fit($"  {"Current",-18} {TruncateForProgress(_current, Math.Max(20, width - 22))}", width),
+                Fit($"  {"Rate",-18} {rate}", width)
+            ];
+        }
+
+        private string BuildSingleLine()
+        {
+            var progress = FormatProgress();
+            var elapsed = EtaEstimator.FormatDuration(_stopwatch.Elapsed);
+            var eta = _eta.Format(_processed, _total, _stopwatch.Elapsed);
+            var counts = _hasMutationCounts
+                ? $"inserted {_inserted:N0}, updated {_updated:N0}, skipped {_skipped:N0}"
+                : $"chunks {_indexedChunks:N0}";
+
+            return $"  processing {_label}: {progress}, elapsed {elapsed}, {eta}, {counts}" +
+                   $"{(string.IsNullOrWhiteSpace(_current) ? "" : $" | {_current}")}";
+        }
+
+        private string FormatProgress()
+        {
+            var percent = _total == 0 ? 100 : (int)Math.Round(_processed * 100d / _total);
+            return $"{_processed:N0}/{_total:N0} ({percent}%)";
+        }
+
+        private string FormatRate()
+        {
+            if (_processed <= 0 || _stopwatch.Elapsed.TotalSeconds <= 0)
+            {
+                return "calculating";
+            }
+
+            var secondsPerItem = _stopwatch.Elapsed.TotalSeconds / _processed;
+            var itemsPerMinute = 60d / secondsPerItem;
+            return itemsPerMinute >= 1
+                ? $"{itemsPerMinute:N1} items/min | avg {EtaEstimator.FormatDuration(TimeSpan.FromSeconds(secondsPerItem))}/item"
+                : $"{(1d / itemsPerMinute):N1} min/item | avg {EtaEstimator.FormatDuration(TimeSpan.FromSeconds(secondsPerItem))}/item";
+        }
+
+        private static bool IsInteractiveConsole()
+        {
+            if (Console.IsOutputRedirected)
+            {
+                return false;
+            }
+
+            var term = Environment.GetEnvironmentVariable("TERM");
+            return !string.Equals(term, "dumb", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int GetConsoleWidth()
+        {
+            try
+            {
+                return Math.Clamp(Console.WindowWidth, 80, 180);
+            }
+            catch
+            {
+                return 120;
             }
         }
 
-        private void Report(int indexedChunks)
+        private static string Fit(string value, int width)
         {
-            _lastReport = _stopwatch.Elapsed;
-            var percent = _total == 0 ? 100 : (int)Math.Round(_processed * 100d / _total);
-            var rate = _stopwatch.Elapsed.TotalSeconds <= 0 ? 0 : _processed / _stopwatch.Elapsed.TotalSeconds;
-            var remaining = _processed >= _total
-                ? "done"
-                : rate <= 0
-                ? "eta unknown"
-                : $"eta {TimeSpan.FromSeconds((_total - _processed) / rate):hh\\:mm\\:ss}";
-
-            Console.WriteLine(
-                $"  processing {_label}: {_processed:N0}/{_total:N0} ({percent}%) " +
-                $"chunks {indexedChunks:N0}, {remaining}" +
-                $"{(string.IsNullOrWhiteSpace(_current) ? "" : $" | {_current}")}");
+            value = Regex.Replace(value, @"\s+$", "");
+            return value.Length <= width ? value : value[..Math.Max(0, width - 3)] + "...";
         }
 
-        private static string TruncateForProgress(string value)
+        private static string TruncateForProgress(string value, int maxLength = 100)
         {
             value = Regex.Replace(value, @"\s+", " ").Trim();
-            return value.Length <= 100 ? value : value[..97] + "...";
+            return value.Length <= maxLength ? value : value[..Math.Max(0, maxLength - 3)] + "...";
+        }
+    }
+
+    private sealed class EtaEstimator
+    {
+        private const int WarmupSamples = 5;
+        private const double RecentWeight = 0.35d;
+        private const double SmoothingAlpha = 0.08d;
+
+        private TimeSpan? _itemStartedAt;
+        private int _samples;
+        private double _smoothedSecondsPerItem;
+
+        public void StartItem(TimeSpan elapsed)
+        {
+            _itemStartedAt = elapsed;
+        }
+
+        public void FinishItem(TimeSpan elapsed)
+        {
+            if (_itemStartedAt is not { } startedAt)
+            {
+                return;
+            }
+
+            var seconds = Math.Max(0.001d, (elapsed - startedAt).TotalSeconds);
+            _samples++;
+            _smoothedSecondsPerItem = _samples == 1
+                ? seconds
+                : (_smoothedSecondsPerItem * (1d - SmoothingAlpha)) + (seconds * SmoothingAlpha);
+            _itemStartedAt = null;
+        }
+
+        public string Format(int processed, int total, TimeSpan elapsed)
+        {
+            if (processed >= total)
+            {
+                return "done";
+            }
+
+            if (processed <= 0 || elapsed.TotalSeconds <= 0)
+            {
+                return "eta unknown";
+            }
+
+            var averageSecondsPerItem = elapsed.TotalSeconds / processed;
+            var secondsPerItem = _samples < WarmupSamples
+                ? averageSecondsPerItem
+                : (averageSecondsPerItem * (1d - RecentWeight)) + (_smoothedSecondsPerItem * RecentWeight);
+
+            var remainingSeconds = Math.Max(0d, (total - processed) * secondsPerItem);
+            return $"eta ~{FormatDuration(TimeSpan.FromSeconds(remainingSeconds))}";
+        }
+
+        public static string FormatDuration(TimeSpan value)
+        {
+            if (value.TotalDays >= 1)
+            {
+                var roundedHours = (int)Math.Round(value.TotalHours);
+                return $"{roundedHours / 24}d {roundedHours % 24}h";
+            }
+
+            if (value.TotalHours >= 2)
+            {
+                var roundedMinutes = RoundToNearest(value.TotalMinutes, 5);
+                return $"{roundedMinutes / 60}h{roundedMinutes % 60:00}m";
+            }
+
+            if (value.TotalHours >= 1)
+            {
+                var roundedMinutes = RoundToNearest(value.TotalMinutes, 1);
+                return $"{roundedMinutes / 60}h{roundedMinutes % 60:00}m";
+            }
+
+            if (value.TotalMinutes >= 10)
+            {
+                return $"{RoundToNearest(value.TotalMinutes, 1)}m";
+            }
+
+            if (value.TotalMinutes >= 1)
+            {
+                var roundedSeconds = RoundToNearest(value.TotalSeconds, 10);
+                return $"{roundedSeconds / 60}m{roundedSeconds % 60:00}s";
+            }
+
+            return $"{Math.Max(1, (int)Math.Round(value.TotalSeconds))}s";
+        }
+
+        private static int RoundToNearest(double value, int step)
+        {
+            return Math.Max(step, (int)Math.Round(value / step) * step);
         }
     }
 
@@ -741,4 +1416,56 @@ public static class IndexCommand
         ("FIXME", "possui marcador FIXME", "technical_risk", 0.72m),
         ("HACK", "possui marcador HACK", "technical_risk", 0.72m)
     ];
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true
+    };
+
+    private sealed class SemanticRulesResponse
+    {
+        [JsonPropertyName("rules")]
+        public List<SemanticRuleItem> Rules { get; set; } = [];
+    }
+
+    private sealed class SemanticRuleItem
+    {
+        [JsonPropertyName("title")]
+        public string? Title { get; set; }
+
+        [JsonPropertyName("description")]
+        public string? Description { get; set; }
+
+        [JsonPropertyName("evidence")]
+        public string? Evidence { get; set; }
+
+        [JsonPropertyName("confidence")]
+        public decimal? Confidence { get; set; }
+    }
+
+    private sealed class SemanticKnowledgeResponse
+    {
+        [JsonPropertyName("knowledge")]
+        public List<SemanticKnowledgeItem> Knowledge { get; set; } = [];
+    }
+
+    private sealed class SemanticKnowledgeItem
+    {
+        [JsonPropertyName("kind")]
+        public string? Kind { get; set; }
+
+        [JsonPropertyName("title")]
+        public string? Title { get; set; }
+
+        [JsonPropertyName("content")]
+        public string? Content { get; set; }
+
+        [JsonPropertyName("evidence")]
+        public string? Evidence { get; set; }
+
+        [JsonPropertyName("confidence")]
+        public decimal? Confidence { get; set; }
+    }
 }

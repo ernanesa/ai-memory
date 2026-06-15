@@ -79,6 +79,11 @@ public static class ConfigService
         return FirstNonEmpty(modelOverride, Environment.GetEnvironmentVariable("AI_MEMORY_EMBED_MODEL"), config.EmbeddingModel, "bge-m3");
     }
 
+    public static string ResolveSemanticModel(AiMemoryConfig config, string? modelOverride = null)
+    {
+        return FirstNonEmpty(modelOverride, Environment.GetEnvironmentVariable("AI_MEMORY_SEMANTIC_MODEL"), config.SemanticModel, "qwen2.5-coder:7b");
+    }
+
     private static AiMemoryConfig CreateDefault()
     {
         return new AiMemoryConfig
@@ -89,7 +94,8 @@ public static class ConfigService
             DatabaseUser = Environment.GetEnvironmentVariable("AI_MEMORY_DB_USER") ?? Environment.UserName,
             DatabasePassword = Environment.GetEnvironmentVariable("AI_MEMORY_DB_PASSWORD"),
             OllamaBaseUrl = Environment.GetEnvironmentVariable("AI_MEMORY_OLLAMA") ?? "http://localhost:11434",
-            EmbeddingModel = Environment.GetEnvironmentVariable("AI_MEMORY_EMBED_MODEL") ?? "bge-m3"
+            EmbeddingModel = Environment.GetEnvironmentVariable("AI_MEMORY_EMBED_MODEL") ?? "bge-m3",
+            SemanticModel = Environment.GetEnvironmentVariable("AI_MEMORY_SEMANTIC_MODEL") ?? "qwen2.5-coder:7b"
         };
     }
 
@@ -102,6 +108,7 @@ public static class ConfigService
         config.DatabasePassword = FirstNonEmptyOrNull(config.DatabasePassword);
         config.OllamaBaseUrl = FirstNonEmpty(config.OllamaBaseUrl, "http://localhost:11434");
         config.EmbeddingModel = FirstNonEmpty(config.EmbeddingModel, "bge-m3");
+        config.SemanticModel = FirstNonEmpty(config.SemanticModel, "qwen2.5-coder:7b");
         config.Projects ??= [];
         config.Workspaces ??= [];
 
@@ -203,7 +210,8 @@ public static class ConfigService
             DatabaseUser = config.DatabaseUser,
             DatabasePassword = config.DatabasePassword,
             OllamaBaseUrl = config.OllamaBaseUrl,
-            EmbeddingModel = config.EmbeddingModel
+            EmbeddingModel = config.EmbeddingModel,
+            SemanticModel = config.SemanticModel
         };
     }
 
@@ -246,5 +254,6 @@ public static class ConfigService
         public string? DatabasePassword { get; set; }
         public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
         public string EmbeddingModel { get; set; } = "bge-m3";
+        public string SemanticModel { get; set; } = "qwen2.5-coder:7b";
     }
 }

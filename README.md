@@ -69,7 +69,7 @@ O setup funciona em duas fases:
 
 Na etapa de workspaces, informe um nome como `claps` ou `pagueOn`. Para cada workspace, informe um diretório de projeto por vez. O nome do projeto é inferido automaticamente pelo nome da pasta. Quando não quiser adicionar mais projetos naquele workspace, pressione Enter sem preencher o diretório. Depois o setup pergunta se deseja configurar outro workspace.
 
-Durante a execução, a interface usa cores para destacar estados, perguntas, avisos e sucesso. Logs de instalação e comandos externos são compactados: o setup exibe apenas as últimas linhas relevantes em cor discreta, mantendo a interação principal legível. Ao final, ele mostra um resumo colorido com o que foi concluído, ignorado ou ficou pendente.
+Durante a execução, a interface usa cores para destacar estados, perguntas, avisos e sucesso. Logs de instalação e comandos externos são compactados: o setup exibe apenas as últimas linhas relevantes em cor discreta, mantendo a interação principal legível. Downloads de modelos via `ollama pull` são exceção: a saída é exibida em tempo real para acompanhar o progresso. Ao final, ele mostra um resumo colorido com o que foi concluído, ignorado ou ficou pendente.
 
 Quando possível, ele também automatiza a preparação local:
 
@@ -242,6 +242,8 @@ Dividir por objeto principal ou arquivo inteiro quando pequeno.
 
 ### Arquivos ignorados
 
+Quando o projeto está dentro de um repositório Git, a enumeração de arquivos usa `git ls-files --cached --others --exclude-standard`, respeitando `.gitignore`, `.git/info/exclude` e excludes globais do Git. Fora de um repositório Git, ou se o comando `git` não estiver disponível, a tool usa os ignores fixos abaixo:
+
 ```text
 .git/
 bin/
@@ -252,7 +254,12 @@ coverage/
 packages/
 .idea/
 .vs/
+.vscode/
 ```
+
+Além dos diretórios acima, arquivos C# de migrations geradas pelo Entity Framework são ignorados na indexação de chunks e nas fases `rules`/`knowledge`. A detecção não depende apenas do caminho: a tool procura estrutura/conteúdo típico de EF, como classes que herdam `Migration` ou `ModelSnapshot`, atributos `[Migration]`/`[DbContext]`, `MigrationBuilder` e `BuildTargetModel`. Ao rodar `index chunks`, chunks antigos de arquivos identificados como migrations EF também são removidos do escopo do workspace/projeto indexado.
+
+Projetos e arquivos de teste também são ignorados por padrão em `chunks`, `rules` e `knowledge`. A detecção considera projetos com `Microsoft.NET.Test.Sdk`, `xunit`, `NUnit`, `MSTest`, `<IsTestProject>true</IsTestProject>` ou `coverlet.collector`, além de arquivos C# com atributos como `[Fact]`, `[Theory]`, `[Test]`, `[TestMethod]`, `[TestClass]`, `[TestFixture]`, `[SetUp]` e nomes/pastas comuns como `Tests`, `UnitTests`, `IntegrationTests` e `Specs`. Ao rodar `index chunks`, chunks antigos identificados como teste também são removidos do escopo do workspace/projeto indexado.
 
 ### Tamanho máximo sugerido
 
@@ -277,6 +284,7 @@ ai-memory project add
 ai-memory project add --workspace pagueOn
 ai-memory project list --workspace claps
 ai-memory index
+ai-memory index --semantic
 ai-memory index --workspace claps
 ai-memory index chunks --project gestor --workspace claps
 ai-memory index rules knowledge --workspace claps
@@ -312,6 +320,8 @@ ai-memory index chunks knowledge
 ai-memory index chunks rules knowledge
 ai-memory index chunks --project gestor --workspace claps
 ai-memory index rules knowledge --candidate-limit 10000
+ai-memory index rules knowledge --semantic --semantic-model qwen2.5-coder:7b --candidate-limit 500
+ai-memory index rules knowledge --semantic --refresh --candidate-limit 500
 ```
 
 Sem fases explícitas, `ai-memory index` representa o pipeline completo:
@@ -332,9 +342,21 @@ As fases `rules` e `knowledge` fazem extração heurística conservadora a parti
 
 Essas fases são incrementais por `content_hash`. A tool processa chunks candidatos que nunca foram processados naquela fase, que falharam anteriormente ou cujo conteúdo mudou desde a última extração.
 
+A extração de `rules` e `knowledge` ignora chunks que pareçam migrations geradas pelo Entity Framework ou código de teste, mesmo que esses chunks já existam no banco de uma indexação anterior. Isso evita gastar embedding/modelo semântico com `Migration`, `*.Designer.cs`, `*ModelSnapshot.cs`, asserts, fixtures, mocks e cenários artificiais que normalmente não são a melhor fonte de regras de negócio.
+
 A fase `rules` considera sinais explícitos de regra de negócio, incluindo exceções de domínio, validações, FluentValidation e padrões de erro/notificação como `ErroContext`, `ErrosContext`, `AdicionarErro`, `AddErro`, `AddFailure`, `AddNotification`, `Notificar`, `RuleFor`, `Validator`, `TemErro`, `HasError`, `IsValid` e termos de domínio como bloqueado, cancelado, vencido, elegível e permitido.
 
-Durante `chunks`, a tool mostra progresso a cada arquivo processado, percentual, total de chunks indexados, estimativa de tempo restante e arquivo atual. Durante `rules` e `knowledge`, mostra progresso por candidato com total processado, percentual, inseridos, atualizados, ignorados, estimativa de tempo restante e o arquivo/símbolo atual. Essas etapas podem demorar porque cada chunk ou candidato precisa gerar embedding antes de ser salvo.
+Com `--semantic`, as fases `rules` e `knowledge` usam extração semântica nos chunks candidatos, mas continuam respeitando o estado incremental: chunks já processados com o mesmo `content_hash` são ignorados. A tool chama o modelo informado por `--semantic-model` ou `AI_MEMORY_SEMANTIC_MODEL`, pede JSON estruturado, exige evidência copiada do próprio chunk e descarta itens sem evidência. Esse modo é mais lento, mas ajuda na descoberta inicial de projetos com padrões de validação, erro ou arquitetura que a heurística ainda não conhece.
+
+Para `rules --semantic`, a seleção passa por um gate antes de chamar o modelo: handlers, services, application/domain services, use cases, policies, specifications e queries com sinais de decisão/regra são priorizados; migrations, mappings EF, DTOs simples, interfaces puras, constants/configurations/options e fatos técnicos evidentes são evitados. Depois da resposta do modelo, a tool rejeita candidatos que pareçam apenas constante, GUID, assinatura de método, capacidade de consulta ou descrição técnica, como `permite obter`, `busca`, `retorna` ou `cria lista`, quando não houver restrição/decisão de domínio.
+
+Use `--refresh` quando quiser revisitar todos os chunks que combinam com o escopo da fase, mesmo que já estejam marcados como processados. Isso é útil quando a estratégia de extração mudou e você quer refazer a análise, por exemplo:
+
+```bash
+ai-memory index rules knowledge --semantic --refresh --candidate-limit 500
+```
+
+Durante `chunks`, `rules` e `knowledge`, a tool mostra um painel de progresso com 4 linhas em terminais interativos, atualizado a cada 1 segundo sem ficar gerando novas linhas continuamente. O painel mostra fase, progresso, tempo decorrido, ETA, contadores, arquivo/símbolo atual e taxa média em formato tabular. Quando a saída é redirecionada para arquivo, pipe ou CI, a tool volta para logs lineares para evitar códigos de cursor no arquivo. O ETA é exibido como aproximação arredondada e suavizada, por exemplo `eta ~11h45m`, porque chamadas de LLM podem variar muito entre chunks e uma precisão em segundos tende a oscilar sem representar melhor o tempo real. Essas etapas podem demorar porque cada chunk ou candidato precisa gerar embedding antes de ser salvo.
 
 Por padrão, `rules` e `knowledge` analisam todos os chunks candidatos encontrados no escopo. Para limitar o recorte:
 
@@ -342,9 +364,11 @@ Por padrão, `rules` e `knowledge` analisam todos os chunks candidatos encontrad
 ai-memory index rules --candidate-limit 5000
 ai-memory index knowledge --candidate-limit 10000
 ai-memory index rules knowledge --candidate-limit 2000
+ai-memory index rules knowledge --semantic --candidate-limit 500
+ai-memory index rules knowledge --semantic --refresh --candidate-limit 500
 ```
 
-A saída mostra quantos chunks existem no escopo, quantos combinam com os filtros de candidato, quantos ainda estão pendentes por fase/hash e quantos foram selecionados para processamento. Quando nenhum `--candidate-limit` é informado, a tool mostra um aviso em amarelo informando que todos os chunks candidatos pendentes serão processados, que a etapa pode demorar porque cada candidato gera embedding, e que é possível usar `--candidate-limit <n>` para processar um lote menor.
+A saída inicial de `rules` e `knowledge` mostra uma tabela de escopo com total de chunks, candidatos encontrados, já processados, novos pendentes, falhos, alterados por hash, acionáveis, selecionados, `refresh` e `candidate limit`. Quando nenhum `--candidate-limit` é informado, a tool mostra um aviso em amarelo informando que todos os chunks candidatos selecionados serão processados, que a etapa pode demorar porque cada candidato gera embedding, e que é possível usar `--candidate-limit <n>` para processar um lote menor.
 
 O comando `ai-memory mcp` inicia o servidor MCP via STDIO. Ele já expõe ferramentas para agentes consultarem a memória local indexada:
 
@@ -360,7 +384,10 @@ export AI_MEMORY_DB_USER="postgres"
 export AI_MEMORY_DB_PASSWORD="senha"
 export AI_MEMORY_OLLAMA="http://localhost:11434"
 export AI_MEMORY_EMBED_MODEL="bge-m3"
+export AI_MEMORY_SEMANTIC_MODEL="qwen2.5-coder:7b"
 ```
+
+Durante o `setup`, a tool pode puxar os modelos Ollama ausentes usados pelo fluxo padrão: `bge-m3` para embeddings e `qwen2.5-coder:7b` para extração semântica. O progresso do `ollama pull` é exibido em tempo real.
 
 ---
 
@@ -404,129 +431,135 @@ A localização exata do arquivo depende da extensão/agente usado.
 
 ### Skill: engenharia com memória
 
-```text
-Antes de responder sobre código, arquitetura ou regra de negócio:
+```md
+---
+name: ma9-context-first-response
+description: 'Forca resposta baseada em contexto antes de opinar sobre codigo, arquitetura ou regra de negocio. Use quando pedir analise tecnica, explicacao de codigo, proposta de implementacao, revisao arquitetural ou recomendacao de padrao. Executa fluxo: consultar memoria, buscar codigo relacionado, buscar regras de negocio, buscar decisoes arquiteturais, e so depois responder com fatos vs inferencias, incertezas e referencias de arquivos.'
+argument-hint: 'Tema/pergunta tecnica que precisa de resposta com lastro em codigo e contexto'
+user-invocable: true
+---
 
-1. Consulte a ferramenta ai-memory.
-2. Busque código relacionado.
-3. Busque regras de negócio relacionadas.
-4. Busque decisões arquiteturais relacionadas.
-5. Só então responda.
+# Context First Response
 
-Ao responder:
+## Objetivo
+Gerar respostas tecnicas com rastreabilidade, reduzindo alucinacao e sugestoes que conflitem com o codigo existente.
 
-- cite arquivos relevantes;
-- diferencie fato de inferência;
-- destaque incertezas;
-- evite sugerir padrões que conflitem com o código existente.
+## Quando usar
+- Perguntas sobre codigo, arquitetura, regra de negocio ou trade-offs tecnicos.
+- Pedidos de implementacao, refatoracao, code review ou troubleshooting.
+- Situacoes em que o usuario quer evidencias concretas no repositorio.
+
+## Nao usar
+- Conversa casual sem conteudo tecnico.
+- Solicitacoes sem necessidade de validacao por codigo (ex.: texto institucional).
+
+## Fluxo obrigatorio
+1. Consultar ai-memory antes de qualquer conclusao.
+2. Buscar codigo relacionado ao pedido (arquivos, simbolos, chamadas e testes).
+3. Buscar regras de negocio relacionadas (docs, contratos, validacoes, regras em codigo).
+4. Buscar decisoes arquiteturais relacionadas (ADRs, convencoes, camadas, dependencias).
+5. So entao montar a resposta final.
+
+## Regras de decisao
+- Se faltar evidencias em um dos 4 blocos (memoria, codigo, negocio, arquitetura), declarar explicitamente a lacuna.
+- Se houver conflito entre sugestao e implementacao atual, priorizar aderencia ao codigo existente e sinalizar alternativa como opcional.
+- Se nao houver certeza suficiente, perguntar apenas o minimo necessario para desbloquear.
+
+## Criterios de qualidade antes de responder
+- Ha pelo menos uma evidencia concreta de codigo relacionada ao tema.
+- Ha indicacao clara do que e fato observado e do que e inferencia.
+- Ha secao de incertezas/riscos quando aplicavel.
+- Nao ha recomendacao que contradiga padrao vigente sem justificativa explicita.
+
+## Formato de resposta
+- Arquivos relevantes: liste os arquivos usados como base.
+- Fatos observados: afirmacoes verificadas no contexto.
+- Inferencias: hipoteses ou extrapolacoes, rotuladas como tal.
+- Incertezas: pontos que dependem de confirmacao.
+- Recomendacao aderente: proposta que respeita o codigo existente.
+
+## Checklist rapido
+- ai-memory consultada
+- codigo relacionado consultado
+- regra de negocio consultada
+- decisoes arquiteturais consultadas
+- fatos vs inferencias separados
+- incertezas destacadas
+- sem conflito com padrao existente
 ```
 
 ### Skill: refatoração
 
-```text
-Antes de propor refatoração:
+```md
+---
+name: ma9-refactor-impact-first
+description: 'Guia propostas de refatoracao com base no codigo existente. Use quando pedir refatoracao, melhoria estrutural, simplificacao ou limpeza tecnica. Executa fluxo: buscar implementacoes similares, interfaces existentes, padroes do projeto e regras de negocio afetadas; evitar duplicacao; propor mudancas pequenas com impacto, arquivos envolvidos e riscos.'
+argument-hint: 'Area/codigo que precisa de proposta de refatoracao'
+user-invocable: true
+---
 
-1. Procure implementações similares.
-2. Procure interfaces já existentes.
-3. Procure padrões usados no mesmo projeto.
-4. Procure regras de negócio afetadas.
-5. Evite duplicação.
+# Refactor Impact First
 
-Ao propor mudança:
+## Objetivo
+Produzir propostas de refatoracao aderentes ao projeto, com baixo risco de regressao e sem duplicacao desnecessaria.
 
-- indique impacto;
-- indique arquivos envolvidos;
-- indique riscos;
-- proponha passos pequenos.
+## Quando usar
+- Pedido de refatoracao em codigo existente.
+- Pedido de melhoria de design sem mudanca de regra de negocio.
+- Pedido de consolidacao de implementacoes repetidas.
+
+## Nao usar
+- Criacao de feature nova sem relacao com codigo existente.
+- Mudancas exploratorias sem base em evidencias do repositorio.
+
+## Fluxo obrigatorio antes de propor refatoracao
+1. Procurar implementacoes similares no projeto.
+2. Procurar interfaces ja existentes reutilizaveis.
+3. Procurar padroes adotados no mesmo projeto (naming, camadas, estrutura, contratos).
+4. Procurar regras de negocio afetadas direta e indiretamente.
+5. Eliminar duplicacao na proposta (reuso > copia).
+
+## Decisoes e ramificacoes
+- Se existir implementacao similar confiavel: propor convergencia para o padrao existente.
+- Se existir interface compativel: priorizar extensao/adaptacao em vez de criar nova interface.
+- Se nao houver padrao claro: nao bloquear a proposta; declarar incerteza e sugerir menor mudanca reversivel com validacao rapida.
+- Se regra de negocio puder mudar comportamento: separar refatoracao estrutural de alteracao funcional.
+- Se reduzir duplicacao exigir grande impacto: propor plano em etapas pequenas com checkpoints.
+
+## Criterios de qualidade
+- A proposta explicita impacto tecnico e impacto funcional esperado.
+- Os arquivos envolvidos sao listados com o proposito de cada alteracao.
+- Riscos e possiveis regressos sao mapeados.
+- O plano vem em passos pequenos e verificaveis.
+- Nao recomenda padrao conflitante com o que ja existe no projeto sem justificativa.
+
+## Formato de resposta
+- Escopo da refatoracao: objetivo e limites.
+- Impacto tecnico: estrutura, acoplamento, reuso, testabilidade e manutencao.
+- Impacto funcional: comportamento que deve permanecer igual e pontos sensiveis de regressao.
+- Arquivos envolvidos: lista de arquivos e proposito de cada ponto de leitura/alteracao.
+- Riscos: regressao, acoplamento, compatibilidade e cobertura de testes.
+- Plano incremental: passos pequenos, com validacao a cada passo.
+
+## Checklist rapido
+- implementacoes similares mapeadas
+- interfaces existentes mapeadas
+- padroes do projeto mapeados
+- regras de negocio impactadas mapeadas
+- duplicacao evitada
+- impacto tecnico indicado
+- impacto funcional indicado
+- arquivos envolvidos com proposito indicados
+- riscos indicados
+- passos pequenos propostos
 ```
 
 ---
 
-## 9. Prompt completo para análise do projeto inteiro
+## 9. Realizar primeira indexação
 
-Use depois que o indexador tiver processado os projetos desejados.
-
-Este prompt foi feito para criar memória persistente no `ai_memory`, não para gerar relatórios Markdown.
-
-```text
-Você é um arquiteto de software especializado em sistemas .NET corporativos.
-
-Analise todo o workspace usando a memória local do ai-memory.
-
-Infraestrutura obrigatória:
-
-- PostgreSQL/pgvector é a fonte persistente da análise.
-- Ollama deve ser usado para gerar embeddings.
-- O modelo de embedding deve ser o configurado no ambiente ou na tool, normalmente `bge-m3`.
-- Use `AI_MEMORY_DB`, `AI_MEMORY_OLLAMA` e `AI_MEMORY_EMBED_MODEL` quando estiverem disponíveis.
-- Consulte primeiro as ferramentas MCP `search_code`, `search_business_rules` e `find_related_files`.
-- Quando houver acesso de escrita ao banco, salve as descobertas diretamente nas tabelas `ai_business_rules` e `ai_knowledge`.
-
-Proibição importante:
-
-- Não crie arquivos `.md`, relatórios Markdown, mapas Markdown ou documentos locais como resultado da análise.
-- Não use arquivos Markdown como substituto para persistência.
-- Se não houver ferramenta MCP de escrita nem acesso direto ao PostgreSQL, pare e informe que falta permissão/capacidade de escrita na memória. Não gere um `.md` alternativo.
-
-Objetivos da análise:
-
-1. Identificar arquitetura geral dos sistemas.
-2. Mapear bounded contexts.
-3. Identificar regras de negócio explícitas e implícitas.
-4. Identificar integrações externas.
-5. Identificar entidades principais.
-6. Identificar fluxos críticos.
-7. Identificar dependências entre projetos.
-8. Identificar duplicações e inconsistências.
-9. Identificar riscos técnicos.
-10. Construir uma base de conhecimento reutilizável dentro do banco `ai_memory`.
-
-Fluxo obrigatório:
-
-1. Confirmar que o workspace/projeto já foi indexado.
-2. Consultar a memória existente antes de inferir qualquer conclusão.
-3. Para cada área analisada, buscar código relacionado, regras existentes e arquivos relacionados.
-4. Extrair descobertas pequenas, objetivas e reutilizáveis.
-5. Classificar cada descoberta como regra de negócio, decisão arquitetural, integração, entidade, fluxo crítico, risco técnico, padrão, inconsistência ou oportunidade de refatoração.
-6. Gerar embedding do texto final da descoberta usando Ollama e o modelo configurado.
-7. Persistir cada descoberta no PostgreSQL com referência aos arquivos de origem.
-8. Depois de salvar, validar por consulta semântica que os registros ficaram recuperáveis.
-
-Para regras de negócio, grave em `ai_business_rules`:
-
-- `project_id`: projeto responsável, quando identificável.
-- `title`: nome curto da regra.
-- `description`: descrição objetiva da regra.
-- `source_file`: arquivo principal de origem.
-- `confidence`: número de 0.00 a 1.00.
-- `embedding`: embedding gerado via Ollama.
-
-Para demais descobertas, grave em `ai_knowledge`:
-
-- `project_id`: projeto responsável, quando identificável.
-- `kind`: `architecture`, `bounded_context`, `integration`, `entity`, `critical_flow`, `technical_risk`, `pattern`, `inconsistency` ou `refactoring_opportunity`.
-- `title`: nome curto da descoberta.
-- `content`: explicação objetiva, com arquivos e dependências relevantes.
-- `source`: arquivo, consulta ou conjunto de arquivos que sustentam a descoberta.
-- `confidence`: número de 0.00 a 1.00.
-- `embedding`: embedding gerado via Ollama.
-
-Critérios de qualidade:
-
-- Diferencie fato observado de inferência.
-- Use confiança alta apenas quando houver evidência direta em código ou documentação indexada.
-- Evite descobertas grandes demais; prefira registros pequenos e fáceis de recuperar por busca semântica.
-- Não duplique conhecimento já existente; atualize ou complemente quando possível.
-- Sempre associe a descoberta ao projeto e aos arquivos relevantes.
-- Não sugira padrões que conflitem com o código existente.
-
-Resposta final ao usuário:
-
-- Informe quantos registros foram salvos em `ai_business_rules`.
-- Informe quantos registros foram salvos em `ai_knowledge`.
-- Liste apenas um resumo curto por categoria.
-- Informe incertezas ou partes não analisadas.
-- Não entregue relatório Markdown completo; a fonte de verdade deve ser o banco.
+```bash
+ai-memory index --semantic
 ```
 
 ---
@@ -539,6 +572,7 @@ Resposta final ao usuário:
 - indexação básica;
 - busca vetorial básica;
 - chunking inicial com Roslyn para C#;
+- extração heurística e semântica opcional de regras e conhecimento;
 - comandos `index`, `search`, `watch` e `mcp`;
 - servidor MCP STDIO funcional;
 - ferramentas MCP `search_code`, `search_business_rules` e `find_related_files`.
@@ -547,7 +581,7 @@ Resposta final ao usuário:
 
 1. Implementar watcher real com debounce.
 2. Evoluir chunking C# com símbolos, relações e chamadas.
-3. Evoluir extração automática de regras de negócio e conhecimento com análise semântica mais profunda.
+3. Evoluir extração semântica com deduplicação vetorial e agrupamento de evidências.
 4. Criar tabela de relações entre símbolos.
 5. Criar reranking.
 6. Evoluir dashboard de memória com ações de manutenção.

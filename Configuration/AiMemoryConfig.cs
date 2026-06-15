@@ -14,6 +14,7 @@ public sealed class AiMemoryConfig
     public string? DatabasePassword { get; set; }
     public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
     public string EmbeddingModel { get; set; } = "bge-m3";
+    public string SemanticModel { get; set; } = "qwen2.5-coder:7b";
 }
 
 public sealed class AiMemoryWorkspaceConfig
