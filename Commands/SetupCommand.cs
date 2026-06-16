@@ -22,7 +22,7 @@ public static class SetupCommand
 
         PrintDetectedState(state);
         CollectConfiguration(config, state);
-        state = state with { CanConnectDatabase = await CanConnectToDatabaseAsync(ConfigService.ResolveConnectionString(config)) };
+        state = await DetectStateAsync(config, checkDatabase: true);
 
         Console.WriteLine();
         CollectWorkspaces(config);
@@ -52,35 +52,69 @@ public static class SetupCommand
 
     private static async Task<SetupState> DetectStateAsync(AiMemoryConfig config, bool checkDatabase)
     {
-        var hasBrew = await CommandExistsAsync("brew");
+        var platform = DetectPlatform();
+        var packageManager = platform switch
+        {
+            SetupPlatform.MacOs => "brew",
+            SetupPlatform.Linux => "apt-get",
+            SetupPlatform.Windows => "winget",
+            _ => null
+        };
+
+        var hasPackageManager = packageManager is not null && await CommandExistsAsync(packageManager);
         var hasPostgresClient = await CommandExistsAsync("psql");
-        var hasCreatedb = await CommandExistsAsync("createdb");
-        var hasOllamaCommand = await CommandExistsAsync("ollama");
-        var hasPgVectorFormula = hasBrew && (await RunProcessAsync("brew", ["list", "--formula", "pgvector"], quiet: true)).ExitCode == 0;
+        var hasPgConfig = await CommandExistsAsync("pg_config");
+        var hasOllamaCommand = await ResolveOllamaCommandAsync() is not null;
+        var hasSystemctl = platform == SetupPlatform.Linux && await CommandExistsAsync("systemctl");
+        var hasGit = await CommandExistsAsync("git");
+        var hasNmake = platform == SetupPlatform.Windows && await CommandExistsAsync("nmake");
+        var hasClCompiler = platform == SetupPlatform.Windows && await CommandExistsAsync("cl");
+        var hasPgVectorControlFile = hasPgConfig && await HasPgVectorControlFileAsync();
         var isOllamaReachable = await IsOllamaAvailableAsync(config.OllamaBaseUrl);
         var ollamaModels = isOllamaReachable ? await ListOllamaModelsAsync(config.OllamaBaseUrl) : [];
         var canConnectDatabase = checkDatabase && await CanConnectToDatabaseAsync(ConfigService.ResolveConnectionString(config));
+        var hasPgVectorSupport = hasPgVectorControlFile || checkDatabase && await IsVectorExtensionAvailableAsync(config);
 
         return new SetupState(
-            hasBrew,
+            platform,
+            packageManager,
+            hasPackageManager,
             hasPostgresClient,
-            hasCreatedb,
-            hasPgVectorFormula,
+            hasPgVectorSupport,
             hasOllamaCommand,
             isOllamaReachable,
             ollamaModels,
-            canConnectDatabase);
+            canConnectDatabase,
+            hasSystemctl,
+            hasGit,
+            hasNmake,
+            hasClCompiler);
     }
 
     private static void PrintDetectedState(SetupState state)
     {
         WriteSection("Detected environment");
-        WriteStatus(state.HasBrew, "Homebrew found", "Homebrew not found");
+        WriteInfo($"Platform: {GetPlatformDisplayName(state.Platform)}");
+        if (state.PackageManager is not null)
+        {
+            WriteStatus(state.HasSupportedPackageManager, $"{state.PackageManager} found", $"{state.PackageManager} not found");
+        }
         WriteStatus(state.HasPostgresClient, "PostgreSQL client found", "PostgreSQL client not found");
-        WriteStatus(state.HasPgVectorFormula, "pgvector formula installed", "pgvector formula not found");
+        WriteStatus(state.HasPgVectorSupport, "pgvector available", "pgvector not available");
         WriteStatus(state.HasOllamaCommand, "Ollama command found", "Ollama command not found");
         WriteStatus(state.IsOllamaReachable, "Ollama reachable", "Ollama not reachable");
         WriteStatus(state.CanConnectDatabase, "PostgreSQL database reachable", "PostgreSQL database not reachable");
+        if (state.Platform == SetupPlatform.Linux)
+        {
+            WriteStatus(state.HasSystemctl, "systemctl found", "systemctl not found");
+        }
+
+        if (state.Platform == SetupPlatform.Windows)
+        {
+            var hasWindowsBuildTools = state.HasGit && state.HasNmake && state.HasClCompiler;
+            WriteStatus(hasWindowsBuildTools, "Windows C++ build tools found for pgvector", "Windows C++ build tools not found for pgvector");
+        }
+
         Console.WriteLine();
     }
 
@@ -89,7 +123,7 @@ public static class SetupCommand
         config.Database = Prompt("Database name or connection string", config.Database);
         if (!config.Database.Contains('='))
         {
-            config.DatabaseUser = Prompt("PostgreSQL user", config.DatabaseUser);
+            config.DatabaseUser = Prompt("PostgreSQL user", GetSuggestedDatabaseUser(config.DatabaseUser, state.Platform));
             config.DatabasePassword = PromptPassword("PostgreSQL password - optional, leave empty for local trust/.pgpass", config.DatabasePassword);
         }
         else
@@ -158,31 +192,13 @@ public static class SetupCommand
         Console.WriteLine();
         WriteSection("Setup actions");
 
-        var installPackages = new List<string>();
-        if (!state.HasBrew)
+        var actions = state.Platform switch
         {
-            WriteWarning("Homebrew is required for automatic package installation.");
-        }
-        else
-        {
-            if (!state.HasPostgresClient && PromptYesNo("Install PostgreSQL with Homebrew?", true))
-            {
-                installPackages.Add("postgresql");
-            }
-
-            if (!state.HasPgVectorFormula && PromptYesNo("Install pgvector with Homebrew?", true))
-            {
-                installPackages.Add("pgvector");
-            }
-
-            if (!state.HasOllamaCommand && PromptYesNo("Install Ollama with Homebrew?", true))
-            {
-                installPackages.Add("ollama");
-            }
-        }
-
-        var startPostgres = state.HasBrew && PromptYesNo("Start PostgreSQL with Homebrew services?", true);
-        var startOllama = state.HasBrew && !state.IsOllamaReachable && PromptYesNo("Start Ollama with Homebrew services?", true);
+            SetupPlatform.MacOs => CollectMacSetupActions(state),
+            SetupPlatform.Linux => CollectLinuxSetupActions(state),
+            SetupPlatform.Windows => CollectWindowsSetupActions(state),
+            _ => []
+        };
 
         var databaseName = GetDatabaseName(config.Database);
         var createDatabase = !state.CanConnectDatabase
@@ -203,9 +219,7 @@ public static class SetupCommand
         }
 
         return new SetupPlan(
-            installPackages.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            startPostgres,
-            startOllama,
+            actions.ToArray(),
             createDatabase,
             applySchema,
             modelsToPull.ToArray());
@@ -214,19 +228,9 @@ public static class SetupCommand
     private static void PrintPlan(SetupPlan plan)
     {
         WriteSection("Planned actions");
-        if (plan.InstallBrewPackages.Length > 0)
+        foreach (var action in plan.Actions)
         {
-            WriteBullet($"brew install {string.Join(' ', plan.InstallBrewPackages)}");
-        }
-
-        if (plan.StartPostgres)
-        {
-            WriteBullet("brew services start postgresql");
-        }
-
-        if (plan.StartOllama)
-        {
-            WriteBullet("brew services start ollama");
+            WriteBullet($"{action.Name}: {action.DisplayText ?? FormatCommand(action.FileName, action.Arguments)}");
         }
 
         if (plan.CreateDatabase)
@@ -254,24 +258,14 @@ public static class SetupCommand
     {
         var results = new List<SetupStepResult>();
 
-        if (plan.InstallBrewPackages.Length > 0)
+        foreach (var action in plan.Actions)
         {
-            var result = await RunAndReportAsync("Install Homebrew packages", "brew", ["install", .. plan.InstallBrewPackages]);
-            results.Add(ToStepResult("Install packages", result));
-        }
-
-        if (plan.StartPostgres)
-        {
-            var result = await RunAndReportAsync("Start PostgreSQL", "brew", "services", "start", "postgresql");
-            results.Add(ToStepResult("Start PostgreSQL", result));
-            await Task.Delay(1000);
-        }
-
-        if (plan.StartOllama)
-        {
-            var result = await RunAndReportAsync("Start Ollama", "brew", "services", "start", "ollama");
-            results.Add(ToStepResult("Start Ollama", result));
-            await Task.Delay(1500);
+            var result = await RunAndReportAsync(action);
+            results.Add(ToStepResult(action.Name, result));
+            if (action.PauseAfterMs > 0)
+            {
+                await Task.Delay(action.PauseAfterMs);
+            }
         }
 
         if (plan.CreateDatabase)
@@ -294,8 +288,8 @@ public static class SetupCommand
 
     private static async Task<SetupStepResult> CreateDatabaseIfNeededAsync(AiMemoryConfig config)
     {
-        var connectionString = ConfigService.ResolveConnectionString(config);
-        if (await CanConnectToDatabaseAsync(connectionString))
+        var targetConnectionString = ConfigService.ResolveConnectionString(config);
+        if (await CanConnectToDatabaseAsync(targetConnectionString))
         {
             var message = "PostgreSQL database already reachable";
             WriteSuccess(message);
@@ -310,19 +304,43 @@ public static class SetupCommand
             return SetupStepResult.Warning("Create database", message);
         }
 
-        if (!await CommandExistsAsync("createdb"))
+        if (databaseName.Equals("postgres", StringComparison.OrdinalIgnoreCase))
         {
-            const string message = "createdb not found. Database was not created.";
+            const string message = "Target database is 'postgres' and is not reachable";
             WriteWarning(message);
             return SetupStepResult.Warning("Create database", message);
         }
 
-        var result = await RunAndReportAsync(
-            "Create database",
-            "createdb",
-            ["-U", config.DatabaseUser, databaseName],
-            BuildPostgresEnvironment(config));
-        return ToStepResult("Create database", result);
+        var adminConnectionString = BuildConnectionStringForDatabase(targetConnectionString, "postgres");
+        try
+        {
+            await using var conn = new NpgsqlConnection(adminConnectionString);
+            await conn.OpenAsync();
+
+            await using var existsCmd = conn.CreateCommand();
+            existsCmd.CommandText = "select exists (select 1 from pg_database where datname = @name)";
+            existsCmd.Parameters.AddWithValue("name", databaseName);
+            var exists = (bool)(await existsCmd.ExecuteScalarAsync() ?? false);
+            if (!exists)
+            {
+                await using var createCmd = conn.CreateCommand();
+                var quotedDatabaseName = new NpgsqlCommandBuilder().QuoteIdentifier(databaseName);
+                createCmd.CommandText = $"create database {quotedDatabaseName}";
+                await createCmd.ExecuteNonQueryAsync();
+            }
+
+            var message = exists
+                ? $"PostgreSQL database already exists: {databaseName}"
+                : $"PostgreSQL database created: {databaseName}";
+            WriteSuccess(message);
+            return SetupStepResult.Success("Create database", message);
+        }
+        catch (Exception ex)
+        {
+            var message = $"Failed to create database: {ex.Message}";
+            WriteWarning(message);
+            return SetupStepResult.Warning("Create database", message);
+        }
     }
 
     private static async Task<SetupStepResult> ApplySchemaAsync(AiMemoryConfig config)
@@ -374,6 +392,14 @@ public static class SetupCommand
         catch (Exception ex)
         {
             var schemaErrorMessage = $"Failed to apply schema: {ex.Message}";
+            if (ex.Message.Contains("vector", StringComparison.OrdinalIgnoreCase) &&
+                (ex.Message.Contains("control", StringComparison.OrdinalIgnoreCase) ||
+                 ex.Message.Contains("extension", StringComparison.OrdinalIgnoreCase)))
+            {
+                schemaErrorMessage += OperatingSystem.IsWindows()
+                    ? " Install pgvector in the PostgreSQL server, then rerun ai-memory setup."
+                    : " Install pgvector for the PostgreSQL server, then rerun ai-memory setup.";
+            }
             WriteWarning(schemaErrorMessage);
             return SetupStepResult.Warning("Apply schema", schemaErrorMessage);
         }
@@ -389,14 +415,15 @@ public static class SetupCommand
             return SetupStepResult.Success("Pull model", message);
         }
 
-        if (!await CommandExistsAsync("ollama"))
+        var ollamaCommand = await ResolveOllamaCommandAsync();
+        if (ollamaCommand is null)
         {
             const string message = "Ollama command not found. Model was not pulled.";
             WriteWarning(message);
             return SetupStepResult.Warning("Pull model", message);
         }
 
-        var result = await RunAndReportAsync("Pull Ollama model", "ollama", ["pull", model], streamOutput: true);
+        var result = await RunAndReportAsync("Pull Ollama model", ollamaCommand, ["pull", model], streamOutput: true);
         return ToStepResult("Pull model", result);
     }
 
@@ -494,7 +521,8 @@ public static class SetupCommand
     {
         try
         {
-            var result = await RunProcessAsync(command, ["--version"], quiet: true);
+            var locator = OperatingSystem.IsWindows() ? "where" : "which";
+            var result = await RunProcessAsync(locator, [command], quiet: true);
             return result.ExitCode == 0;
         }
         catch
@@ -567,14 +595,423 @@ public static class SetupCommand
         }
     }
 
-    private static Dictionary<string, string?> BuildPostgresEnvironment(AiMemoryConfig config)
+    private static List<SetupAction> CollectMacSetupActions(SetupState state)
     {
-        if (string.IsNullOrWhiteSpace(config.DatabasePassword))
+        var actions = new List<SetupAction>();
+        if (!state.HasSupportedPackageManager)
         {
-            return [];
+            WriteWarning("Homebrew is required for automatic package installation on macOS.");
+            return actions;
         }
 
-        return new Dictionary<string, string?> { ["PGPASSWORD"] = config.DatabasePassword };
+        var installPackages = new List<string>();
+        var installPostgres = !state.HasPostgresClient && PromptYesNo("Install PostgreSQL with Homebrew?", true);
+        var installPgvector = !state.HasPgVectorSupport && PromptYesNo("Install pgvector with Homebrew?", true);
+        var installOllama = !state.HasOllamaCommand && PromptYesNo("Install Ollama with Homebrew?", true);
+
+        if (installPostgres)
+        {
+            installPackages.Add("postgresql");
+        }
+
+        if (installPgvector)
+        {
+            installPackages.Add("pgvector");
+        }
+
+        if (installOllama)
+        {
+            installPackages.Add("ollama");
+        }
+
+        if (installPackages.Count > 0)
+        {
+            actions.Add(new SetupAction(
+                "Install Homebrew packages",
+                "brew",
+                ["install", .. installPackages.Distinct(StringComparer.OrdinalIgnoreCase)]));
+        }
+
+        if ((state.HasPostgresClient || installPostgres) && PromptYesNo("Start PostgreSQL with Homebrew services?", true))
+        {
+            actions.Add(new SetupAction("Start PostgreSQL", "brew", ["services", "start", "postgresql"], PauseAfterMs: 1000));
+        }
+
+        if ((state.HasOllamaCommand || installOllama) &&
+            !state.IsOllamaReachable &&
+            PromptYesNo("Start Ollama with Homebrew services?", true))
+        {
+            actions.Add(new SetupAction("Start Ollama", "brew", ["services", "start", "ollama"], PauseAfterMs: 1500));
+        }
+
+        return actions;
+    }
+
+    private static List<SetupAction> CollectLinuxSetupActions(SetupState state)
+    {
+        var actions = new List<SetupAction>();
+        if (!state.HasSupportedPackageManager)
+        {
+            WriteWarning("Ubuntu automation requires apt/apt-get.");
+            return actions;
+        }
+
+        var needsAptUpdate = false;
+        var installPostgres = !state.HasPostgresClient && PromptYesNo("Install PostgreSQL with apt?", true);
+        var installPgvector = !state.HasPgVectorSupport && PromptYesNo("Install pgvector for PostgreSQL?", true);
+        var installOllama = !state.HasOllamaCommand && PromptYesNo("Install Ollama with the official Linux installer?", true);
+
+        if (installPostgres || installPgvector)
+        {
+            needsAptUpdate = true;
+        }
+
+        if (needsAptUpdate)
+        {
+            actions.Add(new SetupAction("Refresh apt package index", "sudo", ["apt-get", "update"]));
+        }
+
+        if (installPostgres)
+        {
+            actions.Add(new SetupAction(
+                "Install PostgreSQL",
+                "sudo",
+                ["apt-get", "install", "-y", "postgresql", "postgresql-contrib"]));
+        }
+
+        if (installPgvector)
+        {
+            const string script = """
+set -euo pipefail
+if ! command -v psql >/dev/null 2>&1; then
+  echo "psql not found. Install PostgreSQL first."
+  exit 1
+fi
+pg_major=$(psql --version | awk '{print $3}' | cut -d. -f1)
+if [ -z "$pg_major" ]; then
+  echo "Could not detect PostgreSQL major version."
+  exit 1
+fi
+pkg="postgresql-${pg_major}-pgvector"
+if apt-cache show "$pkg" >/dev/null 2>&1; then
+  sudo apt-get install -y "$pkg"
+  exit 0
+fi
+sudo apt-get install -y build-essential "postgresql-server-dev-${pg_major}" git
+tmpdir=$(mktemp -d)
+git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git "$tmpdir/pgvector"
+cd "$tmpdir/pgvector"
+make
+sudo make install
+""";
+
+            actions.Add(new SetupAction(
+                "Install pgvector",
+                "bash",
+                ["-lc", script],
+                StreamOutput: true,
+                DisplayText: "bash -lc <install pgvector via apt/build>"));
+        }
+
+        if (installOllama)
+        {
+            actions.Add(new SetupAction(
+                "Install Ollama",
+                "bash",
+                ["-lc", "curl -fsSL https://ollama.com/install.sh | sh"],
+                StreamOutput: true,
+                DisplayText: "bash -lc \"curl -fsSL https://ollama.com/install.sh | sh\""));
+        }
+
+        if ((state.HasPostgresClient || installPostgres) && state.HasSystemctl)
+        {
+            if (PromptYesNo("Start PostgreSQL with systemctl?", true))
+            {
+                actions.Add(new SetupAction("Start PostgreSQL", "sudo", ["systemctl", "start", "postgresql"], PauseAfterMs: 1000));
+            }
+        }
+        else if (installPostgres || state.HasPostgresClient)
+        {
+            WriteWarning("Automatic PostgreSQL service start on Linux requires systemctl.");
+        }
+
+        if ((state.HasOllamaCommand || installOllama) && !state.IsOllamaReachable && state.HasSystemctl)
+        {
+            if (PromptYesNo("Start Ollama with systemctl?", true))
+            {
+                actions.Add(new SetupAction("Start Ollama", "sudo", ["systemctl", "start", "ollama"], PauseAfterMs: 1500));
+            }
+        }
+        else if ((installOllama || state.HasOllamaCommand) && !state.HasSystemctl)
+        {
+            WriteWarning("Automatic Ollama service start on Linux requires systemctl.");
+        }
+
+        return actions;
+    }
+
+    private static List<SetupAction> CollectWindowsSetupActions(SetupState state)
+    {
+        var actions = new List<SetupAction>();
+        if (!state.HasSupportedPackageManager)
+        {
+            WriteWarning("winget is required for automatic package installation on Windows.");
+        }
+
+        var installPostgres = false;
+        var installOllama = false;
+        if (state.HasSupportedPackageManager)
+        {
+            installPostgres = !state.HasPostgresClient &&
+                              PromptYesNo("Install PostgreSQL 18 with winget (interactive installer)?", true);
+            installOllama = !state.HasOllamaCommand &&
+                            PromptYesNo("Install Ollama with winget?", true);
+
+            if (installPostgres)
+            {
+                actions.Add(new SetupAction(
+                    "Install PostgreSQL",
+                    "winget",
+                    ["install", "--id", "PostgreSQL.PostgreSQL.18", "-e", "--interactive", "--accept-source-agreements", "--accept-package-agreements"]));
+            }
+
+            if (installOllama)
+            {
+                actions.Add(new SetupAction(
+                    "Install Ollama",
+                    "winget",
+                    ["install", "--id", "Ollama.Ollama", "-e", "--interactive", "--accept-source-agreements", "--accept-package-agreements"]));
+            }
+        }
+
+        if (!state.HasPgVectorSupport)
+        {
+            if (state.HasGit && state.HasNmake && state.HasClCompiler)
+            {
+                if (PromptYesNo("Build/install pgvector for PostgreSQL now?", true))
+                {
+                    const string script = """
+$pgRoot = Get-ChildItem "$env:ProgramFiles\PostgreSQL" -Directory -ErrorAction SilentlyContinue |
+  Sort-Object Name -Descending |
+  Select-Object -First 1
+if (-not $pgRoot) { throw "PostgreSQL installation directory not found under Program Files\PostgreSQL." }
+$tmp = Join-Path $env:TEMP ("pgvector-" + [guid]::NewGuid().ToString("N"))
+git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git $tmp
+Push-Location $tmp
+$env:PGROOT = $pgRoot.FullName
+& nmake /F Makefile.win
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& nmake /F Makefile.win install
+exit $LASTEXITCODE
+""";
+
+                    actions.Add(new SetupAction(
+                        "Install pgvector",
+                        "powershell",
+                        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                        StreamOutput: true,
+                        DisplayText: "powershell -Command <build pgvector with nmake>"));
+                }
+            }
+            else
+            {
+                WriteWarning("pgvector is not available yet. On Windows, automatic installation needs git plus Visual Studio C++ tools with cl/nmake.");
+            }
+        }
+
+        if (state.HasPostgresClient || installPostgres)
+        {
+            if (PromptYesNo("Start PostgreSQL Windows service?", true))
+            {
+                const string startPostgresScript = """
+$service = Get-Service | Where-Object { $_.Name -like 'postgresql*' } | Sort-Object Name | Select-Object -First 1
+if (-not $service) { throw "PostgreSQL Windows service not found." }
+if ($service.Status -ne 'Running') { Start-Service -Name $service.Name }
+""";
+
+                actions.Add(new SetupAction(
+                    "Start PostgreSQL",
+                    "powershell",
+                    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", startPostgresScript],
+                    PauseAfterMs: 1000,
+                    DisplayText: "powershell -Command <start PostgreSQL service>"));
+            }
+        }
+
+        if ((state.HasOllamaCommand || installOllama) && !state.IsOllamaReachable)
+        {
+            if (PromptYesNo("Start Ollama in the background?", true))
+            {
+                const string startOllamaScript = """
+$candidates = @()
+$cmd = Get-Command ollama -ErrorAction SilentlyContinue
+if ($cmd) { $candidates += $cmd.Source }
+$candidates += "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+$candidates += "$env:ProgramFiles\Ollama\ollama.exe"
+$exe = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $exe) { throw "Ollama executable not found." }
+Start-Process $exe -ArgumentList "serve" -WindowStyle Hidden
+""";
+
+                actions.Add(new SetupAction(
+                    "Start Ollama",
+                    "powershell",
+                    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", startOllamaScript],
+                    PauseAfterMs: 1500,
+                    DisplayText: "powershell -Command <start Ollama serve>"));
+            }
+        }
+
+        return actions;
+    }
+
+    private static string GetSuggestedDatabaseUser(string currentValue, SetupPlatform platform)
+    {
+        if (platform == SetupPlatform.MacOs)
+        {
+            return string.IsNullOrWhiteSpace(currentValue) ? Environment.UserName : currentValue;
+        }
+
+        return string.IsNullOrWhiteSpace(currentValue) || currentValue.Equals(Environment.UserName, StringComparison.OrdinalIgnoreCase)
+            ? "postgres"
+            : currentValue;
+    }
+
+    private static SetupPlatform DetectPlatform()
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            return SetupPlatform.MacOs;
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            return SetupPlatform.Linux;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return SetupPlatform.Windows;
+        }
+
+        return SetupPlatform.Unknown;
+    }
+
+    private static string GetPlatformDisplayName(SetupPlatform platform)
+    {
+        return platform switch
+        {
+            SetupPlatform.MacOs => "macOS",
+            SetupPlatform.Linux => "Linux",
+            SetupPlatform.Windows => "Windows",
+            _ => "Unknown"
+        };
+    }
+
+    private static async Task<bool> HasPgVectorControlFileAsync()
+    {
+        try
+        {
+            var result = await RunProcessAsync("pg_config", ["--sharedir"], quiet: true);
+            if (result.ExitCode != 0)
+            {
+                return false;
+            }
+
+            var sharedDir = result.LogLines.LastOrDefault()?.Trim();
+            if (string.IsNullOrWhiteSpace(sharedDir))
+            {
+                return false;
+            }
+
+            var controlPath = Path.Combine(sharedDir, "extension", "vector.control");
+            return File.Exists(controlPath);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> IsVectorExtensionAvailableAsync(AiMemoryConfig config)
+    {
+        var targetConnectionString = ConfigService.ResolveConnectionString(config);
+        var connectionStrings = new[]
+        {
+            targetConnectionString,
+            BuildConnectionStringForDatabase(targetConnectionString, "postgres")
+        }.Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var connectionString in connectionStrings)
+        {
+            try
+            {
+                await using var conn = new NpgsqlConnection(connectionString);
+                await conn.OpenAsync();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "select exists (select 1 from pg_available_extensions where name = 'vector')";
+                return (bool)(await cmd.ExecuteScalarAsync() ?? false);
+            }
+            catch
+            {
+            }
+        }
+
+        return false;
+    }
+
+    private static string BuildConnectionStringForDatabase(string connectionString, string databaseName)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            Database = databaseName
+        };
+        return builder.ConnectionString;
+    }
+
+    private static async Task<string?> ResolveOllamaCommandAsync()
+    {
+        if (await CommandExistsAsync("ollama"))
+        {
+            return "ollama";
+        }
+
+        foreach (var candidate in GetOllamaCandidatePaths())
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> GetOllamaCandidatePaths()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            yield break;
+        }
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localAppData))
+        {
+            yield return Path.Combine(localAppData, "Programs", "Ollama", "ollama.exe");
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(programFiles))
+        {
+            yield return Path.Combine(programFiles, "Ollama", "ollama.exe");
+        }
+    }
+
+    private static string FormatCommand(string fileName, IReadOnlyList<string> arguments)
+    {
+        return arguments.Count == 0
+            ? fileName
+            : $"{fileName} {string.Join(' ', arguments)}";
     }
 
     private static HttpClient CreateOllamaClient(string baseUrl)
@@ -588,6 +1025,33 @@ public static class SetupCommand
     private static Task<ProcessResult> RunAndReportAsync(string title, string fileName, params string[] arguments)
     {
         return RunAndReportAsync(title, fileName, (IReadOnlyList<string>)arguments, environment: null);
+    }
+
+    private static async Task<ProcessResult> RunAndReportAsync(SetupAction action)
+    {
+        WriteInfo(action.Name);
+        WriteMuted($"> {action.DisplayText ?? FormatCommand(action.FileName, action.Arguments)}");
+        var result = await RunProcessAsync(action.FileName, action.Arguments, quiet: false, action.Environment, action.StreamOutput);
+
+        if (!action.StreamOutput && result.LogLines.Count > 0)
+        {
+            WriteMuted($"Last {Math.Min(MaxVisibleLogLines, result.LogLines.Count)} log line(s):");
+            foreach (var line in result.LogLines.TakeLast(MaxVisibleLogLines))
+            {
+                WriteMuted($"  {line}");
+            }
+        }
+
+        if (result.ExitCode == 0)
+        {
+            WriteSuccess("Command completed");
+        }
+        else
+        {
+            WriteWarning($"Command exited with code {result.ExitCode}");
+        }
+
+        return result;
     }
 
     private static async Task<ProcessResult> RunAndReportAsync(string title, string fileName, IReadOnlyList<string> arguments)
@@ -882,30 +1346,48 @@ public static class SetupCommand
     }
 
     private sealed record SetupState(
-        bool HasBrew,
+        SetupPlatform Platform,
+        string? PackageManager,
+        bool HasSupportedPackageManager,
         bool HasPostgresClient,
-        bool HasCreatedb,
-        bool HasPgVectorFormula,
+        bool HasPgVectorSupport,
         bool HasOllamaCommand,
         bool IsOllamaReachable,
         IReadOnlyList<string> OllamaModels,
-        bool CanConnectDatabase);
+        bool CanConnectDatabase,
+        bool HasSystemctl,
+        bool HasGit,
+        bool HasNmake,
+        bool HasClCompiler);
 
     private sealed record SetupPlan(
-        string[] InstallBrewPackages,
-        bool StartPostgres,
-        bool StartOllama,
+        SetupAction[] Actions,
         bool CreateDatabase,
         bool ApplySchema,
         string[] ModelsToPull)
     {
         public bool IsEmpty =>
-            InstallBrewPackages.Length == 0 &&
-            !StartPostgres &&
-            !StartOllama &&
+            Actions.Length == 0 &&
             !CreateDatabase &&
             !ApplySchema &&
             ModelsToPull.Length == 0;
+    }
+
+    private sealed record SetupAction(
+        string Name,
+        string FileName,
+        string[] Arguments,
+        IReadOnlyDictionary<string, string?>? Environment = null,
+        bool StreamOutput = false,
+        int PauseAfterMs = 0,
+        string? DisplayText = null);
+
+    private enum SetupPlatform
+    {
+        Unknown,
+        MacOs,
+        Linux,
+        Windows
     }
 
     private enum SetupStepStatus

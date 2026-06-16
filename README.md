@@ -73,16 +73,28 @@ Durante a execução, a interface usa cores para destacar estados, perguntas, av
 
 Quando possível, ele também automatiza a preparação local:
 
-- instala dependências faltantes via Homebrew: PostgreSQL, pgvector e Ollama;
-- inicia PostgreSQL e Ollama via `brew services`;
-- cria o banco `ai_memory` usando o usuário PostgreSQL informado;
+- instala dependências do host conforme a plataforma:
+  - macOS: `brew` para PostgreSQL, `pgvector` e Ollama;
+  - Ubuntu: `apt` para PostgreSQL e `pgvector`, e instalador oficial do Ollama;
+  - Windows: `winget` para PostgreSQL e Ollama;
+- inicia PostgreSQL e Ollama conforme a plataforma:
+  - macOS: `brew services`;
+  - Ubuntu: `systemctl`;
+  - Windows: serviço do PostgreSQL e `ollama serve` em background;
+- cria o banco `ai_memory` usando conexão PostgreSQL via Npgsql, sem depender do comando `createdb`;
 - aplica o schema SQL;
 - lista modelos disponíveis no Ollama;
-- baixa o modelo escolhido, por padrão `bge-m3`.
+- baixa os modelos escolhidos, por padrão `bge-m3` e `qwen2.5-coder:7b`.
 
-O usuário padrão do PostgreSQL é o usuário atual do sistema, que é o comportamento comum de uma instalação via Homebrew. Se você usa outro usuário, por exemplo `postgres`, informe esse valor no setup. A senha é opcional: deixe vazia para usar autenticação local, `trust`, peer ou `.pgpass`.
+Observações por plataforma:
 
-Se Homebrew não estiver instalado ou algum serviço não puder ser iniciado automaticamente, o setup mostra o que faltou e pode ser executado novamente depois do ajuste.
+- no macOS, o usuário padrão do PostgreSQL costuma ser o usuário atual do sistema;
+- no Ubuntu e no Windows, o setup sugere `postgres` como padrão;
+- no Ubuntu, o setup tenta instalar `pgvector` pelo pacote compatível com a versão do PostgreSQL e faz fallback para build local quando necessário;
+- no Windows, a instalação via `winget` usa os instaladores interativos dos pacotes;
+- no Windows, o `pgvector` pode exigir instalação manual no servidor PostgreSQL se as build tools do Visual Studio não estiverem disponíveis no terminal atual.
+
+Se o gerenciador de pacotes da plataforma não estiver disponível, se o `pgvector` ainda não estiver presente no servidor, ou se algum serviço não puder ser iniciado automaticamente, o setup mostra o que faltou e pode ser executado novamente depois do ajuste.
 
 ---
 
