@@ -123,12 +123,14 @@ public static class SetupCommand
         config.Database = Prompt("Database name or connection string", config.Database);
         if (!config.Database.Contains('='))
         {
+            config.DatabaseHost = Prompt("PostgreSQL host", config.DatabaseHost);
+            config.DatabasePort = PromptInt("PostgreSQL port", config.DatabasePort, defaultValue: 5432);
             config.DatabaseUser = Prompt("PostgreSQL user", GetSuggestedDatabaseUser(config.DatabaseUser, state.Platform));
             config.DatabasePassword = PromptPassword("PostgreSQL password - optional, leave empty for local trust/.pgpass", config.DatabasePassword);
         }
         else
         {
-            WriteMuted("Database user/password prompts skipped because a full connection string was provided.");
+            WriteMuted("Database host/port/user/password prompts skipped because a full connection string was provided.");
         }
         config.OllamaBaseUrl = Prompt("Ollama base URL", config.OllamaBaseUrl);
         config.EmbeddingModel = PromptModel("Embedding model", state.OllamaModels, config.EmbeddingModel, DefaultEmbeddingModel);
@@ -475,6 +477,21 @@ public static class SetupCommand
 
         return value.Trim().StartsWith("y", StringComparison.OrdinalIgnoreCase)
             || value.Trim().StartsWith("s", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int PromptInt(string label, int currentValue, int defaultValue)
+    {
+        var suggestedValue = currentValue > 0 ? currentValue : defaultValue;
+        while (true)
+        {
+            var answer = Prompt(label, suggestedValue.ToString());
+            if (int.TryParse(answer, out var parsed) && parsed > 0)
+            {
+                return parsed;
+            }
+
+            WriteWarning("Please enter a valid positive integer.");
+        }
     }
 
     private static string? PromptPassword(string label, string? currentValue)

@@ -55,7 +55,8 @@ public static class ConfigService
 
         var builder = new NpgsqlConnectionStringBuilder
         {
-            Host = "localhost",
+            Host = FirstNonEmpty(Environment.GetEnvironmentVariable("AI_MEMORY_DB_HOST"), config.DatabaseHost, "localhost"),
+            Port = FirstInt(Environment.GetEnvironmentVariable("AI_MEMORY_DB_PORT"), config.DatabasePort, 5432),
             Database = value,
             Username = FirstNonEmpty(Environment.GetEnvironmentVariable("AI_MEMORY_DB_USER"), config.DatabaseUser, Environment.UserName)
         };
@@ -91,6 +92,8 @@ public static class ConfigService
             ActiveWorkspace = "Default",
             Workspaces = [new AiMemoryWorkspaceConfig { Name = "Default" }],
             Database = Environment.GetEnvironmentVariable("AI_MEMORY_DB") ?? "ai_memory",
+            DatabaseHost = Environment.GetEnvironmentVariable("AI_MEMORY_DB_HOST") ?? "localhost",
+            DatabasePort = FirstInt(Environment.GetEnvironmentVariable("AI_MEMORY_DB_PORT"), 5432),
             DatabaseUser = Environment.GetEnvironmentVariable("AI_MEMORY_DB_USER") ?? Environment.UserName,
             DatabasePassword = Environment.GetEnvironmentVariable("AI_MEMORY_DB_PASSWORD"),
             OllamaBaseUrl = Environment.GetEnvironmentVariable("AI_MEMORY_OLLAMA") ?? "http://localhost:11434",
@@ -104,6 +107,8 @@ public static class ConfigService
         config.WorkspaceName = FirstNonEmpty(config.WorkspaceName, "Default");
         config.ActiveWorkspace = FirstNonEmpty(config.ActiveWorkspace, config.WorkspaceName, "Default");
         config.Database = FirstNonEmpty(config.Database, "ai_memory");
+        config.DatabaseHost = FirstNonEmpty(config.DatabaseHost, "localhost");
+        config.DatabasePort = config.DatabasePort <= 0 ? 5432 : config.DatabasePort;
         config.DatabaseUser = FirstNonEmpty(config.DatabaseUser, Environment.UserName);
         config.DatabasePassword = FirstNonEmptyOrNull(config.DatabasePassword);
         config.OllamaBaseUrl = FirstNonEmpty(config.OllamaBaseUrl, "http://localhost:11434");
@@ -207,6 +212,8 @@ public static class ConfigService
             ActiveWorkspace = config.ActiveWorkspace,
             Workspaces = config.Workspaces,
             Database = config.Database,
+            DatabaseHost = config.DatabaseHost,
+            DatabasePort = config.DatabasePort,
             DatabaseUser = config.DatabaseUser,
             DatabasePassword = config.DatabasePassword,
             OllamaBaseUrl = config.OllamaBaseUrl,
@@ -245,11 +252,29 @@ public static class ConfigService
         return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
     }
 
+    private static int FirstInt(params object?[] values)
+    {
+        foreach (var value in values)
+        {
+            switch (value)
+            {
+                case int intValue when intValue > 0:
+                    return intValue;
+                case string stringValue when int.TryParse(stringValue.Trim(), out var parsed) && parsed > 0:
+                    return parsed;
+            }
+        }
+
+        return 5432;
+    }
+
     private sealed class PersistedAiMemoryConfig
     {
         public string ActiveWorkspace { get; set; } = "Default";
         public List<AiMemoryWorkspaceConfig> Workspaces { get; set; } = [];
         public string Database { get; set; } = "ai_memory";
+        public string DatabaseHost { get; set; } = "localhost";
+        public int DatabasePort { get; set; } = 5432;
         public string DatabaseUser { get; set; } = Environment.UserName;
         public string? DatabasePassword { get; set; }
         public string OllamaBaseUrl { get; set; } = "http://localhost:11434";

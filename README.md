@@ -64,7 +64,7 @@ ai-memory setup
 
 O setup funciona em duas fases:
 
-1. Coleta todas as respostas do usuário: banco, usuário/senha opcionais do PostgreSQL, URL do Ollama, modelo de embedding, workspaces, projetos e ações automáticas permitidas.
+1. Coleta todas as respostas do usuário: banco, host, porta, usuário/senha opcionais do PostgreSQL, URL do Ollama, modelo de embedding, workspaces, projetos e ações automáticas permitidas.
 2. Executa o plano até o fim sem novas perguntas.
 
 Na etapa de workspaces, informe um nome como `claps` ou `pagueOn`. Para cada workspace, informe um diretório de projeto por vez. O nome do projeto é inferido automaticamente pelo nome da pasta. Quando não quiser adicionar mais projetos naquele workspace, pressione Enter sem preencher o diretório. Depois o setup pergunta se deseja configurar outro workspace.
@@ -90,6 +90,7 @@ Observações por plataforma:
 
 - no macOS, o usuário padrão do PostgreSQL costuma ser o usuário atual do sistema;
 - no Ubuntu e no Windows, o setup sugere `postgres` como padrão;
+- host e porta do PostgreSQL são opcionais no setup e usam `localhost` e `5432` por padrão;
 - no Ubuntu, o setup tenta instalar `pgvector` pelo pacote compatível com a versão do PostgreSQL e faz fallback para build local quando necessário;
 - no Windows, a instalação via `winget` usa os instaladores interativos dos pacotes;
 - no Windows, o `pgvector` pode exigir instalação manual no servidor PostgreSQL se as build tools do Visual Studio não estiverem disponíveis no terminal atual.
@@ -392,12 +393,16 @@ Variáveis opcionais:
 
 ```bash
 export AI_MEMORY_DB="Host=localhost;Database=ai_memory;Username=postgres"
+export AI_MEMORY_DB_HOST="localhost"
+export AI_MEMORY_DB_PORT="5432"
 export AI_MEMORY_DB_USER="postgres"
 export AI_MEMORY_DB_PASSWORD="senha"
 export AI_MEMORY_OLLAMA="http://localhost:11434"
 export AI_MEMORY_EMBED_MODEL="bge-m3"
 export AI_MEMORY_SEMANTIC_MODEL="qwen2.5-coder:7b"
 ```
+
+Se `AI_MEMORY_DB` contiver uma connection string completa, ela tem prioridade e o setup não pergunta `host`, `porta`, `usuário` e `senha` separadamente.
 
 Durante o `setup`, a tool pode puxar os modelos Ollama ausentes usados pelo fluxo padrão: `bge-m3` para embeddings e `qwen2.5-coder:7b` para extração semântica. O progresso do `ollama pull` é exibido em tempo real.
 

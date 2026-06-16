@@ -10,6 +10,8 @@ public sealed class AiMemoryConfig
     public List<AiMemoryProjectConfig> Projects { get; set; } = [];
 
     public string Database { get; set; } = "ai_memory";
+    public string DatabaseHost { get; set; } = "localhost";
+    public int DatabasePort { get; set; } = 5432;
     public string DatabaseUser { get; set; } = Environment.UserName;
     public string? DatabasePassword { get; set; }
     public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
