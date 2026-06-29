@@ -14,7 +14,7 @@ public sealed class ChunkingService
     { ".git", "bin", "obj", "node_modules", "dist", "coverage", "packages", ".idea", ".vs", ".vscode" };
 
     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
-    { ".cs", ".csproj", ".sln", ".sql", ".json", ".md", ".yml", ".yaml", ".config", ".props", ".targets" };
+    { ".cs", ".csproj", ".sln", ".sql", ".json", ".md", ".yml", ".yaml", ".config", ".props", ".targets", ".razor", ".cshtml" };
 
     public IEnumerable<string> EnumerateFiles(string root)
     {
@@ -44,6 +44,8 @@ public sealed class ChunkingService
             ".sql" => "sql",
             ".md" => "markdown",
             ".json" => "json",
+            ".razor" => "razor",
+            ".cshtml" => "cshtml",
             _ => ext.TrimStart('.')
         };
 

@@ -209,52 +209,116 @@ public sealed class PgVectorService : IAsyncDisposable
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<IReadOnlyList<(string Project, string File, string? Symbol, string Content, double Distance)>> SearchAsync(float[] embedding, int limit, CancellationToken ct = default)
+    public async Task<IReadOnlyList<(string Project, string File, string? Symbol, string Content, double Distance)>> SearchAsync(float[] embedding, string query, int limit, CancellationToken ct = default)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-        SELECT p.name, c.file_path, c.symbol_name, c.content, c.embedding <=> $1 AS distance
+        WITH vector_search AS (
+            SELECT c.id,
+                   row_number() OVER (ORDER BY c.embedding <=> $1) as rank
+            FROM ai_chunks c
+            ORDER BY c.embedding <=> $1
+            LIMIT $2 * 2
+        ),
+        text_search AS (
+            SELECT c.id,
+                   row_number() OVER (ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', $3)) DESC) as rank
+            FROM ai_chunks c
+            WHERE c.search_vector @@ websearch_to_tsquery('english', $3)
+            ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', $3)) DESC
+            LIMIT $2 * 2
+        )
+        SELECT p.name,
+               c.file_path,
+               c.symbol_name,
+               c.content,
+               coalesce(1.0 / (60.0 + v.rank), 0.0) + coalesce(1.0 / (60.0 + t.rank), 0.0) as rrf_score
         FROM ai_chunks c
         JOIN ai_projects p ON p.id = c.project_id
-        ORDER BY c.embedding <=> $1
+        LEFT JOIN vector_search v ON v.id = c.id
+        LEFT JOIN text_search t ON t.id = c.id
+        WHERE v.id IS NOT NULL OR t.id IS NOT NULL
+        ORDER BY rrf_score DESC
         LIMIT $2;
         """;
         cmd.Parameters.AddWithValue(new Vector(embedding));
         cmd.Parameters.AddWithValue(limit);
+        cmd.Parameters.AddWithValue(query.Trim());
+
         var rows = new List<(string, string, string?, string, double)>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
+        {
             rows.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDouble(4)));
+        }
         return rows;
     }
 
-    public async Task<IReadOnlyList<CodeSearchResult>> SearchCodeAsync(float[] embedding, int limit, string? project, CancellationToken ct = default)
+    public async Task<IReadOnlyList<CodeSearchResult>> SearchCodeAsync(float[] embedding, string query, int limit, string? project, CancellationToken ct = default)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-        SELECT p.name, c.file_path, c.language, c.chunk_type, c.symbol_name, c.content, c.embedding <=> $1 AS distance
+        WITH vector_search AS (
+            SELECT c.id,
+                   row_number() OVER (ORDER BY c.embedding <=> $1) as rank
+            FROM ai_chunks c
+            JOIN ai_projects p ON p.id = c.project_id
+            WHERE c.embedding IS NOT NULL
+              AND (
+                  $3::text IS NULL
+                  OR p.name = $3
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ai_workspace_projects wp
+                      JOIN ai_workspaces w ON w.id = wp.workspace_id
+                      WHERE wp.project_id = p.id
+                        AND (w.name = $3 OR w.name || '/' || p.name = $3)
+                  )
+              )
+            ORDER BY c.embedding <=> $1
+            LIMIT $2 * 2
+        ),
+        text_search AS (
+            SELECT c.id,
+                   row_number() OVER (ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', $4)) DESC) as rank
+            FROM ai_chunks c
+            JOIN ai_projects p ON p.id = c.project_id
+            WHERE c.search_vector @@ websearch_to_tsquery('english', $4)
+              AND (
+                  $3::text IS NULL
+                  OR p.name = $3
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ai_workspace_projects wp
+                      JOIN ai_workspaces w ON w.id = wp.workspace_id
+                      WHERE wp.project_id = p.id
+                        AND (w.name = $3 OR w.name || '/' || p.name = $3)
+                  )
+              )
+            ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', $4)) DESC
+            LIMIT $2 * 2
+        )
+        SELECT p.name,
+               c.file_path,
+               c.language,
+               c.chunk_type,
+               c.symbol_name,
+               c.content,
+               coalesce(1.0 / (60.0 + v.rank), 0.0) + coalesce(1.0 / (60.0 + t.rank), 0.0) as rrf_score
         FROM ai_chunks c
         JOIN ai_projects p ON p.id = c.project_id
-        WHERE c.embedding IS NOT NULL
-          AND (
-              $3::text IS NULL
-              OR p.name = $3
-              OR EXISTS (
-                  SELECT 1
-                  FROM ai_workspace_projects wp
-                  JOIN ai_workspaces w ON w.id = wp.workspace_id
-                  WHERE wp.project_id = p.id
-                    AND (w.name = $3 OR w.name || '/' || p.name = $3)
-              )
-          )
-        ORDER BY c.embedding <=> $1
+        LEFT JOIN vector_search v ON v.id = c.id
+        LEFT JOIN text_search t ON t.id = c.id
+        WHERE v.id IS NOT NULL OR t.id IS NOT NULL
+        ORDER BY rrf_score DESC
         LIMIT $2;
         """;
         cmd.Parameters.AddWithValue(new Vector(embedding));
         cmd.Parameters.AddWithValue(limit);
         cmd.Parameters.AddWithValue((object?)NormalizeFilter(project) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(query.Trim());
 
         var rows = new List<CodeSearchResult>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -273,33 +337,74 @@ public sealed class PgVectorService : IAsyncDisposable
         return rows;
     }
 
-    public async Task<IReadOnlyList<BusinessRuleSearchResult>> SearchBusinessRulesAsync(float[] embedding, int limit, string? project, CancellationToken ct = default)
+    public async Task<IReadOnlyList<BusinessRuleSearchResult>> SearchBusinessRulesAsync(float[] embedding, string query, int limit, string? project, CancellationToken ct = default)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-        SELECT p.name, r.title, r.description, r.source_file, r.symbol_name, r.status, r.evidence, r.confidence, r.embedding <=> $1 AS distance
+        WITH vector_search AS (
+            SELECT r.id,
+                   row_number() OVER (ORDER BY r.embedding <=> $1) as rank
+            FROM ai_business_rules r
+            LEFT JOIN ai_projects p ON p.id = r.project_id
+            WHERE r.embedding IS NOT NULL
+              AND r.status <> 'rejected'
+              AND (
+                  $3::text IS NULL
+                  OR p.name = $3
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ai_workspace_projects wp
+                      JOIN ai_workspaces w ON w.id = wp.workspace_id
+                      WHERE wp.project_id = p.id
+                        AND (w.name = $3 OR w.name || '/' || p.name = $3)
+                  )
+              )
+            ORDER BY r.embedding <=> $1
+            LIMIT $2 * 2
+        ),
+        text_search AS (
+            SELECT r.id,
+                   row_number() OVER (ORDER BY ts_rank_cd(r.search_vector, websearch_to_tsquery('portuguese', $4)) DESC) as rank
+            FROM ai_business_rules r
+            LEFT JOIN ai_projects p ON p.id = r.project_id
+            WHERE r.search_vector @@ websearch_to_tsquery('portuguese', $4)
+              AND r.status <> 'rejected'
+              AND (
+                  $3::text IS NULL
+                  OR p.name = $3
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ai_workspace_projects wp
+                      JOIN ai_workspaces w ON w.id = wp.workspace_id
+                      WHERE wp.project_id = p.id
+                        AND (w.name = $3 OR w.name || '/' || p.name = $3)
+                  )
+              )
+            ORDER BY ts_rank_cd(r.search_vector, websearch_to_tsquery('portuguese', $4)) DESC
+            LIMIT $2 * 2
+        )
+        SELECT p.name,
+               r.title,
+               r.description,
+               r.source_file,
+               r.symbol_name,
+               r.status,
+               r.evidence,
+               r.confidence,
+               coalesce(1.0 / (60.0 + v.rank), 0.0) + coalesce(1.0 / (60.0 + t.rank), 0.0) as rrf_score
         FROM ai_business_rules r
         LEFT JOIN ai_projects p ON p.id = r.project_id
-        WHERE r.embedding IS NOT NULL
-          AND r.status <> 'rejected'
-          AND (
-              $3::text IS NULL
-              OR p.name = $3
-              OR EXISTS (
-                  SELECT 1
-                  FROM ai_workspace_projects wp
-                  JOIN ai_workspaces w ON w.id = wp.workspace_id
-                  WHERE wp.project_id = p.id
-                    AND (w.name = $3 OR w.name || '/' || p.name = $3)
-              )
-          )
-        ORDER BY r.embedding <=> $1
+        LEFT JOIN vector_search v ON v.id = r.id
+        LEFT JOIN text_search t ON t.id = r.id
+        WHERE v.id IS NOT NULL OR t.id IS NOT NULL
+        ORDER BY rrf_score DESC
         LIMIT $2;
         """;
         cmd.Parameters.AddWithValue(new Vector(embedding));
         cmd.Parameters.AddWithValue(limit);
         cmd.Parameters.AddWithValue((object?)NormalizeFilter(project) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(query.Trim());
 
         var rows = new List<BusinessRuleSearchResult>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -315,6 +420,96 @@ public sealed class PgVectorService : IAsyncDisposable
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.GetDouble(8)));
+        }
+
+        return rows;
+    }
+
+    public async Task<IReadOnlyList<KnowledgeSearchResult>> SearchKnowledgeAsync(float[] embedding, string query, int limit, string? project, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+        WITH vector_search AS (
+            SELECT k.id,
+                   row_number() OVER (ORDER BY k.embedding <=> $1) as rank
+            FROM ai_knowledge k
+            LEFT JOIN ai_projects p ON p.id = k.project_id
+            WHERE k.embedding IS NOT NULL
+              AND k.status <> 'rejected'
+              AND (
+                  $3::text IS NULL
+                  OR p.name = $3
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ai_workspace_projects wp
+                      JOIN ai_workspaces w ON w.id = wp.workspace_id
+                      WHERE wp.project_id = p.id
+                        AND (w.name = $3 OR w.name || '/' || p.name = $3)
+                  )
+              )
+            ORDER BY k.embedding <=> $1
+            LIMIT $2 * 2
+        ),
+        text_search AS (
+            SELECT k.id,
+                   row_number() OVER (ORDER BY ts_rank_cd(k.search_vector, websearch_to_tsquery('portuguese', $4)) DESC) as rank
+            FROM ai_knowledge k
+            LEFT JOIN ai_projects p ON p.id = k.project_id
+            WHERE k.search_vector @@ websearch_to_tsquery('portuguese', $4)
+              AND k.status <> 'rejected'
+              AND (
+                  $3::text IS NULL
+                  OR p.name = $3
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ai_workspace_projects wp
+                      JOIN ai_workspaces w ON w.id = wp.workspace_id
+                      WHERE wp.project_id = p.id
+                        AND (w.name = $3 OR w.name || '/' || p.name = $3)
+                  )
+              )
+            ORDER BY ts_rank_cd(k.search_vector, websearch_to_tsquery('portuguese', $4)) DESC
+            LIMIT $2 * 2
+        )
+        SELECT p.name,
+               k.kind,
+               k.title,
+               k.content,
+               k.source,
+               k.symbol_name,
+               k.status,
+               k.evidence,
+               k.confidence,
+               coalesce(1.0 / (60.0 + v.rank), 0.0) + coalesce(1.0 / (60.0 + t.rank), 0.0) as rrf_score
+        FROM ai_knowledge k
+        LEFT JOIN ai_projects p ON p.id = k.project_id
+        LEFT JOIN vector_search v ON v.id = k.id
+        LEFT JOIN text_search t ON t.id = k.id
+        WHERE v.id IS NOT NULL OR t.id IS NOT NULL
+        ORDER BY rrf_score DESC
+        LIMIT $2;
+        """;
+        cmd.Parameters.AddWithValue(new Vector(embedding));
+        cmd.Parameters.AddWithValue(limit);
+        cmd.Parameters.AddWithValue((object?)NormalizeFilter(project) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(query.Trim());
+
+        var rows = new List<KnowledgeSearchResult>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new KnowledgeSearchResult(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+                reader.GetDouble(9)));
         }
 
         return rows;
@@ -858,6 +1053,153 @@ public sealed class PgVectorService : IAsyncDisposable
 
         return new UpsertExtractionResult(reader.GetGuid(0), reader.GetString(1), reader.GetString(2));
     }
+
+    public async Task<Guid?> UpsertSymbolAsync(int projectId, Guid? chunkId, string kind, string fullName, string filePath, int lineStart, int lineEnd, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+        INSERT INTO ai_symbols (project_id, chunk_id, kind, full_name, file_path, line_start, line_end)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (project_id, full_name)
+        DO UPDATE SET chunk_id = EXCLUDED.chunk_id,
+                      kind = EXCLUDED.kind,
+                      file_path = EXCLUDED.file_path,
+                      line_start = EXCLUDED.line_start,
+                      line_end = EXCLUDED.line_end
+        RETURNING id;
+        """;
+        cmd.Parameters.AddWithValue(projectId);
+        cmd.Parameters.AddWithValue((object?)chunkId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(kind);
+        cmd.Parameters.AddWithValue(fullName);
+        cmd.Parameters.AddWithValue(filePath);
+        cmd.Parameters.AddWithValue(lineStart);
+        cmd.Parameters.AddWithValue(lineEnd);
+        return (Guid?)await cmd.ExecuteScalarAsync(ct);
+    }
+
+    public async Task UpsertSymbolRelationAsync(Guid sourceId, Guid targetId, string relation, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+        INSERT INTO ai_symbol_relations (source_id, target_id, relation)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (source_id, target_id, relation)
+        DO NOTHING;
+        """;
+        cmd.Parameters.AddWithValue(sourceId);
+        cmd.Parameters.AddWithValue(targetId);
+        cmd.Parameters.AddWithValue(relation);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<Guid?> GetSymbolIdByNameAsync(int projectId, string fullName, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT id FROM ai_symbols WHERE project_id = $1 AND full_name = $2 LIMIT 1;";
+        cmd.Parameters.AddWithValue(projectId);
+        cmd.Parameters.AddWithValue(fullName);
+        return (Guid?)await cmd.ExecuteScalarAsync(ct);
+    }
+
+    public async Task<int> GetProjectIdByNameAsync(string name, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT id FROM ai_projects WHERE name = $1 LIMIT 1;";
+        cmd.Parameters.AddWithValue(name);
+        var res = await cmd.ExecuteScalarAsync(ct);
+        return res is int id ? id : -1;
+    }
+
+    public async Task<Guid?> GetChunkIdBySymbolNameAsync(int projectId, string symbolName, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT id FROM ai_chunks WHERE project_id = $1 AND symbol_name = $2 LIMIT 1;";
+        cmd.Parameters.AddWithValue(projectId);
+        cmd.Parameters.AddWithValue(symbolName);
+        return (Guid?)await cmd.ExecuteScalarAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<(string Project, string Symbol, string File, string Relation)>> GetSymbolCallersAsync(string symbolName, string? project, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+        SELECT p_source.name, s_source.full_name, s_source.file_path, r.relation
+        FROM ai_symbol_relations r
+        JOIN ai_symbols s_source ON s_source.id = r.source_id
+        JOIN ai_symbols s_target ON s_target.id = r.target_id
+        JOIN ai_projects p_source ON p_source.id = s_source.project_id
+        JOIN ai_projects p_target ON p_target.id = s_target.project_id
+        WHERE s_target.full_name ILIKE $1
+          AND ($2::text IS NULL OR p_target.name = $2)
+        ORDER BY p_source.name, s_source.full_name;
+        """;
+        cmd.Parameters.AddWithValue("%" + symbolName);
+        cmd.Parameters.AddWithValue((object?)NormalizeFilter(project) ?? DBNull.Value);
+        
+        var list = new List<(string, string, string, string)>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            list.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+        return list;
+    }
+
+    public async Task<IReadOnlyList<(string Project, string Symbol, string File, string Relation)>> GetSymbolCalleesAsync(string symbolName, string? project, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+        SELECT p_target.name, s_target.full_name, s_target.file_path, r.relation
+        FROM ai_symbol_relations r
+        JOIN ai_symbols s_source ON s_source.id = r.source_id
+        JOIN ai_symbols s_target ON s_target.id = r.target_id
+        JOIN ai_projects p_source ON p_source.id = s_source.project_id
+        JOIN ai_projects p_target ON p_target.id = s_target.project_id
+        WHERE s_source.full_name ILIKE $1
+          AND ($2::text IS NULL OR p_source.name = $2)
+        ORDER BY p_target.name, s_target.full_name;
+        """;
+        cmd.Parameters.AddWithValue("%" + symbolName);
+        cmd.Parameters.AddWithValue((object?)NormalizeFilter(project) ?? DBNull.Value);
+        
+        var list = new List<(string, string, string, string)>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            list.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+        return list;
+    }
+
+    public async Task<IReadOnlyList<(string Project, string ParentName, string Relation)>> GetClassHierarchyAsync(string className, string? project, CancellationToken ct = default)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+        SELECT p_target.name, s_target.full_name, r.relation
+        FROM ai_symbol_relations r
+        JOIN ai_symbols s_source ON s_source.id = r.source_id
+        JOIN ai_symbols s_target ON s_target.id = r.target_id
+        JOIN ai_projects p_target ON p_target.id = s_target.project_id
+        JOIN ai_projects p_source ON p_source.id = s_source.project_id
+        WHERE s_source.full_name ILIKE $1
+          AND r.relation IN ('inherits', 'implements')
+          AND ($2::text IS NULL OR p_source.name = $2)
+        ORDER BY s_target.full_name;
+        """;
+        cmd.Parameters.AddWithValue("%" + className);
+        cmd.Parameters.AddWithValue((object?)NormalizeFilter(project) ?? DBNull.Value);
+        
+        var list = new List<(string, string, string)>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            list.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        return list;
+    }
 }
 
 public sealed record CodeSearchResult(
@@ -874,6 +1216,18 @@ public sealed record BusinessRuleSearchResult(
     string Title,
     string Description,
     string? SourceFile,
+    string? Symbol,
+    string Status,
+    string? Evidence,
+    decimal? Confidence,
+    double Distance);
+
+public sealed record KnowledgeSearchResult(
+    string? Project,
+    string Kind,
+    string Title,
+    string Content,
+    string? Source,
     string? Symbol,
     string Status,
     string? Evidence,
@@ -933,3 +1287,4 @@ public sealed record ExtractedKnowledge(
     string ContentHash);
 
 public sealed record UpsertExtractionResult(Guid? Id, string? Status, string Action);
+

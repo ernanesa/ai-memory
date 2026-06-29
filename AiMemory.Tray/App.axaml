@@ -1,0 +1,33 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AiMemory.Tray.App"
+             RequestedThemeVariant="Default">
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
+    <TrayIcon.Icons>
+        <TrayIcons>
+            <TrayIcon ToolTipText="AI Memory: Idle">
+                <TrayIcon.Menu>
+                    <NativeMenu>
+                        <NativeMenuItem Header="Indexar Workspace" Click="OnIndexNowClick" />
+                        <NativeMenuItem Header="Testar Banco de Dados" Click="OnCheckDatabaseClick" />
+                        <NativeMenuItem Header="Gerenciar PostgreSQL">
+                            <NativeMenuItem.Menu>
+                                <NativeMenu>
+                                    <NativeMenuItem Header="Iniciar Serviço" Click="OnStartPostgresClick" />
+                                    <NativeMenuItem Header="Parar Serviço" Click="OnStopPostgresClick" />
+                                    <NativeMenuItem Header="Reiniciar Serviço" Click="OnRestartPostgresClick" />
+                                    <NativeMenuItemSeparator />
+                                    <NativeMenuItem Header="Criar Banco e Aplicar Migrações" Click="OnCreateDatabaseClick" />
+                                </NativeMenu>
+                            </NativeMenuItem.Menu>
+                        </NativeMenuItem>
+                        <NativeMenuItemSeparator />
+                        <NativeMenuItem Header="Sair" Click="OnExitClick" />
+                    </NativeMenu>
+                </TrayIcon.Menu>
+            </TrayIcon>
+        </TrayIcons>
+    </TrayIcon.Icons>
+</Application>

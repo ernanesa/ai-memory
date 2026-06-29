@@ -99,6 +99,39 @@ Se o gerenciador de pacotes da plataforma não estiver disponível, se o `pgvect
 
 ---
 
+## 3. Tray Application (Bandeja do Sistema)
+
+Criamos uma aplicação visual complementar para a barra de tarefas/bandeja do sistema chamada **`AiMemory.Tray`**, escrita com **Avalonia UI** no .NET 10. Ela permite monitorar visualmente se o servidor MCP está sendo ativamente consumido pelas IDEs (Rider/VS Code/Cursor/Codex).
+
+### Funcionalidades:
+* **Ícone Dinâmico**: Fica **cinza** quando ocioso e **azul ciano brilhante** quando uma IDE estabelece conexão com o servidor MCP (monitoramento de processos em background a cada 4 segundos).
+* **Menu de Contexto**:
+  * **Indexar Workspace**: Dispara a reindexação do código e do grafo de símbolos em background (`ai-memory index`) e notifica o usuário via pop-up do sistema quando o build/index estiver completo.
+  * **Testar Banco de Dados**: Executa um ping assíncrono para verificar se a base PostgreSQL configurada em `config.json` está respondendo.
+  * **Sair**: Fecha a aplicação com segurança.
+* **Notificações Nativas do SO**: Integra-se de forma leve com as ferramentas nativas de cada sistema operacional:
+  * **Linux (GNOME Wayland no Ubuntu / KDE no BigLinux)**: Usa o `notify-send`.
+  * **macOS**: Usa o `osascript` (AppleScript).
+  * **Windows 11**: Usa balões de bandeja acionados por scripts ocultos em `PowerShell`.
+
+### Como instalar e executar a bandeja:
+
+A instalação e a configuração de inicialização automática (autostart) são integradas diretamente ao comando principal de configuração do sistema:
+
+```bash
+ai-memory setup
+```
+
+Durante o fluxo, o setup perguntará: *"Deseja instalar o ícone de bandeja do sistema (System Tray Icon) para inicialização automática?"*. Ao responder sim, o sistema compilará o aplicativo e configurará o atalho de autostart nativo para o seu sistema operacional (como `.config/autostart` no Ubuntu GNOME Wayland e BigLinux KDE, LaunchAgents no macOS, ou pasta Startup no Windows 11).
+
+Caso queira executar a bandeja manualmente para testes ou depuração:
+```bash
+# Executar a partir da raiz do repositório
+dotnet run --project AiMemory.Tray
+```
+
+---
+
 ## 3. Para que servem as tabelas
 
 ### `ai_workspaces`

@@ -148,7 +148,8 @@ public static class IndexCommand
                 {
                     try
                     {
-                        var embedding = await ollamaService.EmbedAsync(chunk.Content);
+                        var contextualText = ContextualChunkingService.GetContextualContent(chunk);
+                        var embedding = await ollamaService.EmbedAsync(contextualText);
                         await pg.UpsertChunkAsync(workspaceName, chunk, embedding);
                         indexedChunks++;
                         progress.AfterChunk(indexedChunks);
@@ -167,6 +168,23 @@ public static class IndexCommand
             }
 
             progress.Complete(indexedChunks);
+
+            try
+            {
+                var projectId = await pg.GetProjectIdByNameAsync(configuredProject.Name);
+                if (projectId > 0)
+                {
+                    Console.WriteLine($"Building symbol graph for {configuredProject.Name}...");
+                    var graphService = new SymbolGraphService(pg, projectId, root);
+                    await graphService.BuildGraphAsync(files);
+                    Console.WriteLine("Symbol graph built successfully.");
+                    Console.WriteLine();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: failed to build symbol graph: {ex.Message}");
+            }
         }
     }
 
@@ -219,13 +237,13 @@ public static class IndexCommand
             var candidates = new List<ExtractedBusinessRule>();
             try
             {
-                candidates.AddRange(ExtractBusinessRules(chunk));
+                candidates.AddRange(RuleExtractionService.ExtractBusinessRules(chunk));
                 if (semanticService is not null)
                 {
-                    candidates.AddRange(await ExtractSemanticBusinessRulesAsync(semanticService, chunk));
+                    candidates.AddRange(await RuleExtractionService.ExtractSemanticBusinessRulesAsync(semanticService, chunk));
                 }
 
-                candidates = DeduplicateBusinessRules(candidates).ToList();
+                candidates = RuleExtractionService.DeduplicateBusinessRules(candidates).ToList();
                 extracted += candidates.Count;
             }
             catch (Exception ex)
@@ -338,13 +356,13 @@ public static class IndexCommand
             var candidates = new List<ExtractedKnowledge>();
             try
             {
-                candidates.AddRange(ExtractKnowledge(chunk));
+                candidates.AddRange(KnowledgeExtractionService.ExtractKnowledge(chunk));
                 if (semanticService is not null)
                 {
-                    candidates.AddRange(await ExtractSemanticKnowledgeAsync(semanticService, chunk));
+                    candidates.AddRange(await KnowledgeExtractionService.ExtractSemanticKnowledgeAsync(semanticService, chunk));
                 }
 
-                candidates = DeduplicateKnowledge(candidates).ToList();
+                candidates = KnowledgeExtractionService.DeduplicateKnowledge(candidates).ToList();
                 extracted += candidates.Count;
             }
             catch (Exception ex)
@@ -406,423 +424,6 @@ public static class IndexCommand
         Console.WriteLine($"  knowledge updated:  {updated:N0}");
         Console.WriteLine($"  knowledge skipped:  {skipped:N0}");
         Console.WriteLine("  review status preserved: candidates were not auto-accepted; rejected records were not reactivated.");
-    }
-
-    private static IEnumerable<ExtractedBusinessRule> ExtractBusinessRules(ExtractionChunkResult chunk)
-    {
-        var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match match in BusinessExceptionRegex.Matches(chunk.Content))
-        {
-            var message = NormalizeSentence(match.Groups[1].Value);
-            if (!LooksLikeBusinessRule(message) || !emitted.Add(message))
-            {
-                continue;
-            }
-
-            yield return CreateBusinessRule(chunk, message, GetEvidenceLine(chunk.Content, match.Index), 0.88m);
-        }
-
-        foreach (Match match in ValidationMessageRegex.Matches(chunk.Content))
-        {
-            var message = NormalizeSentence(match.Groups[1].Value);
-            if (!LooksLikeBusinessRule(message) || !emitted.Add(message))
-            {
-                continue;
-            }
-
-            yield return CreateBusinessRule(chunk, message, GetEvidenceLine(chunk.Content, match.Index), 0.78m);
-        }
-
-        foreach (Match match in ErrorContextMessageRegex.Matches(chunk.Content))
-        {
-            var message = NormalizeSentence(match.Groups[1].Value);
-            if (!LooksLikeBusinessRule(message) || !emitted.Add(message))
-            {
-                continue;
-            }
-
-            yield return CreateBusinessRule(chunk, message, GetEvidenceLine(chunk.Content, match.Index), 0.84m);
-        }
-
-        foreach (var line in GetRelevantLines(chunk.Content))
-        {
-            var sentence = NormalizeSentence(line);
-            if (!LooksLikeBusinessRule(sentence) || sentence.Length > 220 || !emitted.Add(sentence))
-            {
-                continue;
-            }
-
-            yield return CreateBusinessRule(chunk, sentence, line, 0.64m);
-        }
-    }
-
-    private static ExtractedBusinessRule CreateBusinessRule(ExtractionChunkResult chunk, string message, string evidence, decimal confidence)
-    {
-        var title = ToTitle(message, 90);
-        var description = message.EndsWith('.') ? message : message + ".";
-        var contentHash = HashService.Sha256($"{chunk.Project}|rule|{NormalizeKey(title)}");
-        return new ExtractedBusinessRule(chunk.Id, title, description, chunk.File, chunk.Symbol, Truncate(evidence, 500), confidence, contentHash);
-    }
-
-    private static IEnumerable<ExtractedKnowledge> ExtractKnowledge(ExtractionChunkResult chunk)
-    {
-        var content = chunk.Content;
-        foreach (var (keyword, title, kind, confidence) in KnowledgePatterns)
-        {
-            var index = content.IndexOf(keyword, StringComparison.OrdinalIgnoreCase);
-            if (index < 0)
-            {
-                continue;
-            }
-
-            var evidence = GetEvidenceLine(content, index);
-            var fullTitle = $"{chunk.Project}: {title}";
-            var body = kind switch
-            {
-                "integration" => $"O projeto {chunk.Project} possui indício de integração ou comunicação externa relacionada a {keyword}.",
-                "pattern" => $"O projeto {chunk.Project} possui indício de uso do padrão ou biblioteca {keyword}.",
-                "technical_risk" => $"O projeto {chunk.Project} contém marcador técnico que precisa de revisão: {keyword}.",
-                _ => $"O projeto {chunk.Project} contém evidência técnica relacionada a {keyword}."
-            };
-            var contentHash = HashService.Sha256($"{chunk.Project}|knowledge|{kind}|{NormalizeKey(title)}|{chunk.File}");
-            yield return new ExtractedKnowledge(chunk.Id, kind, fullTitle, body, chunk.File, chunk.Symbol, Truncate(evidence, 500), confidence, contentHash);
-        }
-    }
-
-    private static async Task<IReadOnlyList<ExtractedBusinessRule>> ExtractSemanticBusinessRulesAsync(
-        OllamaService semanticService,
-        ExtractionChunkResult chunk)
-    {
-        var json = await semanticService.GenerateJsonAsync(BuildSemanticRulesPrompt(chunk));
-        var payload = JsonSerializer.Deserialize<SemanticRulesResponse>(json, JsonOptions);
-        if (payload?.Rules is null || payload.Rules.Count == 0)
-        {
-            return [];
-        }
-
-        var rules = new List<ExtractedBusinessRule>();
-        foreach (var item in payload.Rules)
-        {
-            var title = NormalizeSentence(item.Title ?? "");
-            var description = NormalizeSentence(item.Description ?? "");
-            var evidence = NormalizeEvidence(item.Evidence ?? "");
-            if (title.Length < 8 ||
-                description.Length < 12 ||
-                !EvidenceExists(chunk.Content, evidence) ||
-                !LooksLikeSemanticBusinessRule(title, description, evidence))
-            {
-                continue;
-            }
-
-            var confidence = NormalizeConfidence(item.Confidence, 0.72m);
-            var contentHash = HashService.Sha256($"{chunk.Project}|rule|{NormalizeKey(title)}");
-            rules.Add(new ExtractedBusinessRule(
-                chunk.Id,
-                ToTitle(title, 90),
-                description.EndsWith('.') ? description : description + ".",
-                chunk.File,
-                chunk.Symbol,
-                Truncate(evidence, 500),
-                confidence,
-                contentHash));
-        }
-
-        return rules;
-    }
-
-    private static async Task<IReadOnlyList<ExtractedKnowledge>> ExtractSemanticKnowledgeAsync(
-        OllamaService semanticService,
-        ExtractionChunkResult chunk)
-    {
-        var json = await semanticService.GenerateJsonAsync(BuildSemanticKnowledgePrompt(chunk));
-        var payload = JsonSerializer.Deserialize<SemanticKnowledgeResponse>(json, JsonOptions);
-        if (payload?.Knowledge is null || payload.Knowledge.Count == 0)
-        {
-            return [];
-        }
-
-        var records = new List<ExtractedKnowledge>();
-        foreach (var item in payload.Knowledge)
-        {
-            var kind = NormalizeKnowledgeKind(item.Kind);
-            var title = NormalizeSentence(item.Title ?? "");
-            var content = NormalizeSentence(item.Content ?? "");
-            var evidence = NormalizeEvidence(item.Evidence ?? "");
-            if (title.Length < 8 || content.Length < 12 || !EvidenceExists(chunk.Content, evidence))
-            {
-                continue;
-            }
-
-            var fullTitle = title.StartsWith(chunk.Project + ":", StringComparison.OrdinalIgnoreCase)
-                ? title
-                : $"{chunk.Project}: {title}";
-            var confidence = NormalizeConfidence(item.Confidence, 0.70m);
-            var contentHash = HashService.Sha256($"{chunk.Project}|knowledge|{kind}|{NormalizeKey(title)}|{chunk.File}");
-            records.Add(new ExtractedKnowledge(
-                chunk.Id,
-                kind,
-                ToTitle(fullTitle, 140),
-                content.EndsWith('.') ? content : content + ".",
-                chunk.File,
-                chunk.Symbol,
-                Truncate(evidence, 500),
-                confidence,
-                contentHash));
-        }
-
-        return records;
-    }
-
-    private static IEnumerable<ExtractedBusinessRule> DeduplicateBusinessRules(IEnumerable<ExtractedBusinessRule> rules)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var rule in rules.OrderByDescending(r => r.Confidence))
-        {
-            if (seen.Add(NormalizeKey(rule.Title)))
-            {
-                yield return rule;
-            }
-        }
-    }
-
-    private static IEnumerable<ExtractedKnowledge> DeduplicateKnowledge(IEnumerable<ExtractedKnowledge> records)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var record in records.OrderByDescending(r => r.Confidence))
-        {
-            if (seen.Add($"{NormalizeKey(record.Kind)}|{NormalizeKey(record.Title)}"))
-            {
-                yield return record;
-            }
-        }
-    }
-
-    private static string BuildSemanticRulesPrompt(ExtractionChunkResult chunk)
-    {
-        return string.Join(Environment.NewLine, [
-            "You extract business rules from source code and documentation.",
-            "Return JSON only. Use this exact shape:",
-            """{"rules":[{"title":"short rule title","description":"business meaning in Portuguese","evidence":"exact excerpt copied from the chunk","confidence":0.0}]}""",
-            "Only include real product/domain constraints, validations, permissions, state transitions, eligibility rules or required data.",
-            "Do not include constants, GUIDs, method signatures, repository/query capabilities, DTO shapes, mappings, configuration, or technical implementation details as business rules.",
-            "Reject facts phrased as 'permite obter', 'busca', 'retorna', 'cria lista', 'codigo constante' unless they impose a domain restriction, obligation or decision.",
-            "Every evidence value must be copied exactly from the chunk. If there is no exact evidence, return {\"rules\":[]}.",
-            "",
-            $"Project: {chunk.Project}",
-            $"File: {chunk.File}",
-            $"Language: {chunk.Language}",
-            $"Chunk type: {chunk.ChunkType}",
-            $"Symbol: {chunk.Symbol}",
-            "",
-            "Chunk:",
-            chunk.Content
-        ]);
-    }
-
-    private static string BuildSemanticKnowledgePrompt(ExtractionChunkResult chunk)
-    {
-        return string.Join(Environment.NewLine, [
-            "You extract technical engineering knowledge from source code and documentation.",
-            "Return JSON only. Use this exact shape:",
-            """{"knowledge":[{"kind":"integration|pattern|technical_risk|architecture|configuration","title":"short technical fact","content":"technical meaning in Portuguese","evidence":"exact excerpt copied from the chunk","confidence":0.0}]}""",
-            "Include integrations, frameworks, architectural patterns, configuration, infrastructure, persistence, messaging, authentication and explicit technical risks.",
-            "Do not include business rules here.",
-            "Every evidence value must be copied exactly from the chunk. If there is no exact evidence, return {\"knowledge\":[]}.",
-            "",
-            $"Project: {chunk.Project}",
-            $"File: {chunk.File}",
-            $"Language: {chunk.Language}",
-            $"Chunk type: {chunk.ChunkType}",
-            $"Symbol: {chunk.Symbol}",
-            "",
-            "Chunk:",
-            chunk.Content
-        ]);
-    }
-
-    private static IEnumerable<string> GetRelevantLines(string content)
-    {
-        return content
-            .Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => line.Length is >= 18 and <= 260)
-            .Where(line =>
-                line.Contains("não pode", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("nao pode", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("deve", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("obrigatório", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("obrigatorio", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("inválido", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("invalido", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("ErroContext", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("ErrosContext", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("AdicionarErro", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("AdicionaErro", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("AddErro", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("AddError", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("AddFailure", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("AddNotification", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Notificar", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("RuleFor", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Elegivel", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Elegível", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Permite", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Bloqueado", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Cancelado", StringComparison.OrdinalIgnoreCase) ||
-                line.Contains("Vencido", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static string GetEvidenceLine(string content, int index)
-    {
-        var start = content.LastIndexOf('\n', Math.Clamp(index, 0, Math.Max(0, content.Length - 1)));
-        start = start < 0 ? 0 : start + 1;
-        var end = content.IndexOf('\n', index);
-        end = end < 0 ? content.Length : end;
-        return content[start..end].Trim();
-    }
-
-    private static bool LooksLikeBusinessRule(string value)
-    {
-        if (value.Length < 12)
-        {
-            return false;
-        }
-
-        return value.Contains("não pode", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("nao pode", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("deve", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("obrigatório", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("obrigatorio", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("inválido", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("invalido", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("bloquead", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("cancelad", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("vencid", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("ErroContext", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("ErrosContext", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("AdicionarErro", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("AdicionaErro", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("AddErro", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("AddError", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("AddFailure", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("AddNotification", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("Notificar", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("RuleFor", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("Elegivel", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("Elegível", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("Permite", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool LooksLikeSemanticBusinessRule(string title, string description, string evidence)
-    {
-        var combined = NormalizeKey($"{title} {description} {evidence}");
-        if (LooksLikeTechnicalFact(combined))
-        {
-            return false;
-        }
-
-        return combined.Contains("nao pode", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("não pode", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("deve", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("obrigator", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("invalid", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("inválid", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("invalido", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("bloque", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("cancel", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("venc", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("eleg", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("permitid", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("proibid", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("restri", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("valid", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("status", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("regra", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("permiss", StringComparison.OrdinalIgnoreCase) ||
-               combined.Contains("limite", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool LooksLikeTechnicalFact(string normalized)
-    {
-        return normalized.Contains("codigo corretor", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("código corretor", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("codigo representante", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("código representante", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("identificador unico", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("identificador único", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("const string", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("public const", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("permite obter", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("permite buscar", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("permite listar", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("obtencao de", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("obtenção de", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("busca de", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("consulta de", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("retorna ", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("criação de lista", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("criacao de lista", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("cria uma lista", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("ienumerable", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("task<ienumerable", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeSentence(string value)
-    {
-        return Regex.Replace(value, @"\s+", " ").Trim().Trim('"', '\'', '.', ';', ',');
-    }
-
-    private static string NormalizeEvidence(string value)
-    {
-        return Regex.Replace(value, @"\s+", " ").Trim().Trim('"', '\'');
-    }
-
-    private static string NormalizeKey(string value)
-    {
-        return Regex.Replace(value.ToLowerInvariant(), @"\s+", " ").Trim();
-    }
-
-    private static bool EvidenceExists(string content, string evidence)
-    {
-        if (evidence.Length < 8)
-        {
-            return false;
-        }
-
-        return content.Contains(evidence, StringComparison.OrdinalIgnoreCase) ||
-               content.Contains(NormalizeSentence(evidence), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static decimal NormalizeConfidence(decimal? value, decimal fallback)
-    {
-        var confidence = value is > 0 ? value.Value : fallback;
-        return Math.Clamp(confidence, 0.10m, 0.95m);
-    }
-
-    private static string NormalizeKnowledgeKind(string? value)
-    {
-        var normalized = NormalizeKey(value ?? "");
-        return normalized switch
-        {
-            "integration" => "integration",
-            "pattern" => "pattern",
-            "technical_risk" => "technical_risk",
-            "architecture" => "architecture",
-            "configuration" => "configuration",
-            _ => "technical"
-        };
-    }
-
-    private static string ToTitle(string value, int maxLength)
-    {
-        var normalized = NormalizeSentence(value);
-        return normalized.Length <= maxLength ? normalized : normalized[..maxLength].TrimEnd() + "...";
-    }
-
-    private static string Truncate(string value, int maxLength)
-    {
-        var normalized = NormalizeSentence(value);
-        return normalized.Length <= maxLength ? normalized : normalized[..maxLength].TrimEnd() + "...";
     }
 
     private static void PrintCandidateScope(ExtractionStats stats, int selectedCandidateChunks, int? candidateLimit, bool refresh)
@@ -1390,82 +991,5 @@ public static class IndexCommand
         {
             return Math.Max(step, (int)Math.Round(value / step) * step);
         }
-    }
-
-    private static readonly Regex BusinessExceptionRegex = new(
-        @"throw\s+new\s+[A-Za-z0-9_.]*(?:Business|Domain|Validation)?Exception\s*\(\s*""([^""]{12,240})""",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    private static readonly Regex ValidationMessageRegex = new(
-        @"(?:WithMessage|AddFailure|AddNotification)\s*\(\s*""([^""]{12,240})""",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    private static readonly Regex ErrorContextMessageRegex = new(
-        @"(?:ErroContext|ErrosContext|AdicionarErro|AdicionaErro|AddErro|AddError|AddFailure|AddNotification|Notificar|AddNotification)\s*(?:<[^>]+>)?\s*\([^\)]*?""([^""]{8,240})""",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Singleline);
-
-    private static readonly (string Keyword, string Title, string Kind, decimal Confidence)[] KnowledgePatterns =
-    [
-        ("HttpClient", "usa HttpClient para comunicação externa", "integration", 0.72m),
-        ("MassTransit", "usa MassTransit para mensageria", "integration", 0.82m),
-        ("RabbitMQ", "usa RabbitMQ para mensageria", "integration", 0.82m),
-        ("Kafka", "usa Kafka para mensageria", "integration", 0.82m),
-        ("MediatR", "usa MediatR para handlers e dispatch interno", "pattern", 0.78m),
-        ("EntityFramework", "usa Entity Framework para persistência", "pattern", 0.78m),
-        ("TODO", "possui marcador TODO", "technical_risk", 0.62m),
-        ("FIXME", "possui marcador FIXME", "technical_risk", 0.72m),
-        ("HACK", "possui marcador HACK", "technical_risk", 0.72m)
-    ];
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        ReadCommentHandling = JsonCommentHandling.Skip,
-        AllowTrailingCommas = true
-    };
-
-    private sealed class SemanticRulesResponse
-    {
-        [JsonPropertyName("rules")]
-        public List<SemanticRuleItem> Rules { get; set; } = [];
-    }
-
-    private sealed class SemanticRuleItem
-    {
-        [JsonPropertyName("title")]
-        public string? Title { get; set; }
-
-        [JsonPropertyName("description")]
-        public string? Description { get; set; }
-
-        [JsonPropertyName("evidence")]
-        public string? Evidence { get; set; }
-
-        [JsonPropertyName("confidence")]
-        public decimal? Confidence { get; set; }
-    }
-
-    private sealed class SemanticKnowledgeResponse
-    {
-        [JsonPropertyName("knowledge")]
-        public List<SemanticKnowledgeItem> Knowledge { get; set; } = [];
-    }
-
-    private sealed class SemanticKnowledgeItem
-    {
-        [JsonPropertyName("kind")]
-        public string? Kind { get; set; }
-
-        [JsonPropertyName("title")]
-        public string? Title { get; set; }
-
-        [JsonPropertyName("content")]
-        public string? Content { get; set; }
-
-        [JsonPropertyName("evidence")]
-        public string? Evidence { get; set; }
-
-        [JsonPropertyName("confidence")]
-        public decimal? Confidence { get; set; }
     }
 }

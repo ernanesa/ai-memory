@@ -12,7 +12,7 @@ public static class SearchCommand
             ConfigService.ResolveOllamaBaseUrl(config, ollama),
             ConfigService.ResolveEmbeddingModel(config, model)).EmbedAsync(query);
         await using var pg = new PgVectorService(ConfigService.ResolveConnectionString(config, db));
-        var results = await pg.SearchAsync(embedding, limit);
+        var results = await pg.SearchAsync(embedding, query, limit);
         foreach (var r in results)
         {
             Console.WriteLine($"[{r.Distance:0.0000}] {r.Project}/{r.File} {(r.Symbol is null ? "" : ":: " + r.Symbol)}");

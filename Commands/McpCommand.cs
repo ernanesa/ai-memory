@@ -148,7 +148,7 @@ public static class McpCommand
                     name = "ai-memory",
                     version = "0.1.2"
                 },
-                instructions = "Use ai-memory tools to retrieve indexed local engineering context before answering questions about configured projects."
+                instructions = "Use ai-memory tools in this order: 1) Call search_code with specific symbols, error messages or domain terms BEFORE reading files from disk. 2) Call search_business_rules when the topic involves domain behavior, validations, permissions or workflows. 3) Call search_knowledge when the topic involves architecture, integrations, patterns or technical decisions. 4) Call find_related_files to discover connected files before refactoring. 5) Only read files directly when ai-memory results are insufficient. Results include distance scores where lower is more relevant (0=exact match, >0.5=weak match). Prefer results with distance < 0.4."
             };
         }
 
@@ -172,7 +172,11 @@ public static class McpCommand
             {
                 "search_code" => await SearchCodeAsync(arguments, ct),
                 "search_business_rules" => await SearchBusinessRulesAsync(arguments, ct),
+                "search_knowledge" => await SearchKnowledgeAsync(arguments, ct),
                 "find_related_files" => await FindRelatedFilesAsync(arguments, ct),
+                "get_symbol_callers" => await GetSymbolCallersAsync(arguments, ct),
+                "get_symbol_callees" => await GetSymbolCalleesAsync(arguments, ct),
+                "get_class_hierarchy" => await GetClassHierarchyAsync(arguments, ct),
                 _ => throw new ArgumentException($"Unknown tool: {toolName}")
             };
         }
@@ -186,9 +190,10 @@ public static class McpCommand
 
             var embedding = await _ollama.EmbedAsync(query, ct);
             await using var pg = new PgVectorService(connectionString);
-            var results = await pg.SearchCodeAsync(embedding, limit, project, ct);
+            var results = await pg.SearchCodeAsync(embedding, query, limit, project, ct);
+            var reranked = RerankerService.RerankCode(results, query);
 
-            var payload = results.Select(r => new
+            var payload = reranked.Select(r => new
             {
                 r.Project,
                 r.File,
@@ -196,7 +201,7 @@ public static class McpCommand
                 r.ChunkType,
                 r.Symbol,
                 r.Distance,
-                Content = Truncate(r.Content, maxContentChars)
+                Content = Truncate(ContextCompressionService.CompressCode(r.Content, r.Language, r.Symbol), maxContentChars)
             }).ToList();
 
             return ToolJsonResult(payload);
@@ -210,8 +215,75 @@ public static class McpCommand
 
             var embedding = await _ollama.EmbedAsync(query, ct);
             await using var pg = new PgVectorService(connectionString);
-            var results = await pg.SearchBusinessRulesAsync(embedding, limit, project, ct);
-            return ToolJsonResult(results);
+            var results = await pg.SearchBusinessRulesAsync(embedding, query, limit, project, ct);
+            var payload = results.Select(r => new
+            {
+                r.Project,
+                r.Title,
+                r.Description,
+                r.SourceFile,
+                r.Symbol,
+                r.Status,
+                Evidence = ContextCompressionService.CompressEvidence(r.Evidence ?? ""),
+                r.Confidence,
+                r.Distance
+            }).ToList();
+            return ToolJsonResult(payload);
+        }
+
+        private async Task<object> SearchKnowledgeAsync(JsonElement arguments, CancellationToken ct)
+        {
+            var query = GetRequiredString(arguments, "query");
+            var limit = GetOptionalInt(arguments, "limit", 10, 1, 50);
+            var project = GetOptionalString(arguments, "project");
+
+            var embedding = await _ollama.EmbedAsync(query, ct);
+            await using var pg = new PgVectorService(connectionString);
+            var results = await pg.SearchKnowledgeAsync(embedding, query, limit, project, ct);
+            var payload = results.Select(r => new
+            {
+                r.Project,
+                r.Kind,
+                r.Title,
+                r.Content,
+                r.Source,
+                r.Symbol,
+                r.Status,
+                Evidence = ContextCompressionService.CompressEvidence(r.Evidence ?? ""),
+                r.Confidence,
+                r.Distance
+            }).ToList();
+            return ToolJsonResult(payload);
+        }
+
+        private async Task<object> GetSymbolCallersAsync(JsonElement arguments, CancellationToken ct)
+        {
+            var symbol = GetRequiredString(arguments, "symbol");
+            var project = GetOptionalString(arguments, "project");
+
+            await using var pg = new PgVectorService(connectionString);
+            var results = await pg.GetSymbolCallersAsync(symbol, project, ct);
+            return ToolJsonResult(results.Select(r => new { Project = r.Project, Symbol = r.Symbol, File = r.File, Relation = r.Relation }));
+        }
+
+        private async Task<object> GetSymbolCalleesAsync(JsonElement arguments, CancellationToken ct)
+        {
+            var symbol = GetRequiredString(arguments, "symbol");
+            var project = GetOptionalString(arguments, "project");
+
+            await using var pg = new PgVectorService(connectionString);
+            var results = await pg.GetSymbolCalleesAsync(symbol, project, ct);
+            return ToolJsonResult(results.Select(r => new { Project = r.Project, Symbol = r.Symbol, File = r.File, Relation = r.Relation }));
+        }
+
+        private async Task<object> GetClassHierarchyAsync(JsonElement arguments, CancellationToken ct)
+        {
+            var className = GetRequiredString(arguments, "className");
+            var project = GetOptionalString(arguments, "project");
+
+            await using var pg = new PgVectorService(connectionString);
+            var results = await pg.GetClassHierarchyAsync(className, project, ct);
+            return ToolJsonResult(results.Select(r => new { Project = r.Project, ParentName = r.ParentName, Relation = r.Relation }));
         }
 
         private async Task<object> FindRelatedFilesAsync(JsonElement arguments, CancellationToken ct)
@@ -255,7 +327,7 @@ public static class McpCommand
                 new
                 {
                     name = "search_code",
-                    description = "Search indexed code, documentation and configuration chunks using semantic similarity.",
+                    description = "Search indexed code, docs and config. Call this BEFORE reading repository files. Returns ranked chunks with distance scores. Use specific symbols, error messages, or domain terms for best results.",
                     inputSchema = new
                     {
                         type = "object",
@@ -272,7 +344,7 @@ public static class McpCommand
                 new
                 {
                     name = "search_business_rules",
-                    description = "Search indexed business rules using semantic similarity.",
+                    description = "Search domain rules, validations and constraints extracted from code. Call when the question involves business logic, permissions, statuses, or workflows. Returns rules with evidence and confidence scores.",
                     inputSchema = new
                     {
                         type = "object",
@@ -288,7 +360,7 @@ public static class McpCommand
                 new
                 {
                     name = "find_related_files",
-                    description = "Find files related to a query or to an already indexed file.",
+                    description = "Discover files semantically connected to a concept or file. Call to understand impact radius before refactoring. Accepts a file path or semantic query as input.",
                     inputSchema = new
                     {
                         type = "object",
@@ -299,6 +371,67 @@ public static class McpCommand
                             ["limit"] = new { type = "integer", description = "Maximum number of files to return.", minimum = 1, maximum = 50, @default = 10 },
                             ["project"] = new { type = "string", description = "Optional project filter. Accepts exact project name or workspace/project." }
                         }
+                    }
+                },
+                new
+                {
+                    name = "search_knowledge",
+                    description = "Search engineering knowledge: architectural decisions, integration patterns, technical risks, configurations and conventions extracted from code. Call when the question involves architecture, infrastructure, dependencies, messaging, authentication or technical patterns.",
+                    inputSchema = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>
+                        {
+                            ["query"] = new { type = "string", description = "Technical topic, pattern, integration or architectural question to search for." },
+                            ["limit"] = new { type = "integer", description = "Maximum number of knowledge entries to return.", minimum = 1, maximum = 50, @default = 10 },
+                            ["project"] = new { type = "string", description = "Optional project filter. Accepts exact project name or workspace/project." }
+                        },
+                        required = new[] { "query" }
+                    }
+                },
+                new
+                {
+                    name = "get_symbol_callers",
+                    description = "Find C# callers of a specific symbol in the code graph (e.g. what methods call MyMethod).",
+                    inputSchema = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>
+                        {
+                            ["symbol"] = new { type = "string", description = "Name of the method or symbol to find callers for." },
+                            ["project"] = new { type = "string", description = "Optional project filter." }
+                        },
+                        required = new[] { "symbol" }
+                    }
+                },
+                new
+                {
+                    name = "get_symbol_callees",
+                    description = "Find C# callees of a specific symbol in the code graph (e.g. what methods MyMethod calls).",
+                    inputSchema = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>
+                        {
+                            ["symbol"] = new { type = "string", description = "Name of the method or symbol to find callees for." },
+                            ["project"] = new { type = "string", description = "Optional project filter." }
+                        },
+                        required = new[] { "symbol" }
+                    }
+                },
+                new
+                {
+                    name = "get_class_hierarchy",
+                    description = "Get C# class inheritance or interface implementations (e.g. parent classes or interfaces of MyClass).",
+                    inputSchema = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>
+                        {
+                            ["className"] = new { type = "string", description = "Name of the class or interface." },
+                            ["project"] = new { type = "string", description = "Optional project filter." }
+                        },
+                        required = new[] { "className" }
                     }
                 }
             ];
