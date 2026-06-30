@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -24,6 +25,8 @@ public partial class App : Application
     private TrayIcon? _trayIcon;
     private bool _isChecking;
     private readonly List<NativeMenuItemBase> _dynamicMenuItems = new();
+    private FileSystemWatcher? _configWatcher;
+    private readonly SemaphoreSlim _menuSemaphore = new(1, 1);
 
     public override void Initialize()
     {
@@ -40,10 +43,10 @@ public partial class App : Application
             // Carregar bitmaps dos assets de ícones
             try
             {
-                using var activeStream = AssetLoader.Open(new Uri("avares://AiMemory.Tray/Assets/active.png"));
+                using var activeStream = AssetLoader.Open(new Uri("avares://ai-memory/Tray/Assets/active.png"));
                 _activeIcon = new WindowIcon(activeStream);
 
-                using var idleStream = AssetLoader.Open(new Uri("avares://AiMemory.Tray/Assets/idle.png"));
+                using var idleStream = AssetLoader.Open(new Uri("avares://ai-memory/Tray/Assets/idle.png"));
                 _idleIcon = new WindowIcon(idleStream);
             }
             catch (Exception ex)
@@ -53,9 +56,13 @@ public partial class App : Application
 
             // Capturar instância do TrayIcon
             _trayIcon = TrayIcon.GetIcons(this)?.FirstOrDefault();
-            if (_trayIcon is not null && _idleIcon is not null)
+            if (_trayIcon is not null)
             {
-                _trayIcon.Icon = _idleIcon;
+                _trayIcon.IsVisible = true;
+                if (_idleIcon is not null)
+                {
+                    _trayIcon.Icon = _idleIcon;
+                }
             }
 
             // Iniciar o timer de monitoramento a cada 4 segundos
@@ -71,6 +78,9 @@ public partial class App : Application
 
             // Carregar projetos no menu
             _ = RefreshProjectsMenuAsync();
+
+            // Configurar FileSystemWatcher para monitorar o config.json
+            SetupConfigWatcher();
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -79,6 +89,9 @@ public partial class App : Application
     private async void OnTimerTick(object? sender, EventArgs e)
     {
         if (_trayIcon is null || _isChecking) return;
+
+        // Garantir visibilidade contínua
+        _trayIcon.IsVisible = true;
 
         _isChecking = true;
         try
@@ -106,11 +119,14 @@ public partial class App : Application
     {
         try
         {
+            var currentPid = Environment.ProcessId;
             var processes = Process.GetProcesses();
             try
             {
                 foreach (var p in processes)
                 {
+                    if (p.Id == currentPid) continue;
+
                     string procName;
                     try
                     {
@@ -121,22 +137,28 @@ public partial class App : Application
                         continue;
                     }
 
-                    // Busca por execução direta do CLI do ai-memory
-                    if (procName.Contains("ai-memory"))
-                    {
-                        return true;
-                    }
-
-                    // Busca no Linux por processos dotnet rodando nossa tool global localmente
-                    if (procName == "dotnet" && OperatingSystem.IsLinux())
+                    // Se for ai-memory ou dotnet
+                    if (procName.Contains("ai-memory") || procName == "dotnet")
                     {
                         try
                         {
-                            var cmdlinePath = $"/proc/{p.Id}/cmdline";
-                            if (File.Exists(cmdlinePath))
+                            if (OperatingSystem.IsLinux())
                             {
-                                var cmdline = File.ReadAllText(cmdlinePath);
-                                if (cmdline.Contains("ai-memory") && cmdline.Contains("mcp"))
+                                var cmdlinePath = $"/proc/{p.Id}/cmdline";
+                                if (File.Exists(cmdlinePath))
+                                {
+                                    var cmdline = File.ReadAllText(cmdlinePath);
+                                    // Se o comando contém "ai-memory" e "mcp", e não contém "tray"
+                                    if (cmdline.Contains("ai-memory") && cmdline.Contains("mcp") && !cmdline.Contains("tray"))
+                                    {
+                                        return true;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // No Windows/macOS, o executável seria ai-memory.exe ou ai-memory
+                                if (procName.Contains("ai-memory"))
                                 {
                                     return true;
                                 }
@@ -144,7 +166,7 @@ public partial class App : Application
                         }
                         catch
                         {
-                            // Ignore permission or rapid exit exceptions
+                            // Ignorar falhas de permissão ou saída rápida
                         }
                     }
                 }
@@ -159,7 +181,7 @@ public partial class App : Application
         }
         catch
         {
-            // Ignorar falhas de segurança ao acessar processos
+            // Ignorar falhas
         }
 
         return false;
@@ -167,89 +189,97 @@ public partial class App : Application
 
     private async Task RefreshProjectsMenuAsync()
     {
-        if (_trayIcon?.Menu is not { } menu) return;
-
-        // Remover itens dinâmicos anteriores
-        foreach (var item in _dynamicMenuItems)
-        {
-            menu.Items.Remove(item);
-        }
-        _dynamicMenuItems.Clear();
-
+        await _menuSemaphore.WaitAsync();
         try
         {
-            var config = await Task.Run(() => ConfigService.LoadAsync());
-            var workspace = ConfigService.GetWorkspace(config);
-            var projects = workspace?.Projects ?? [];
+            if (_trayIcon?.Menu is not { } menu) return;
 
-            // Tentar obter contagem de chunks indexados por projeto
-            Dictionary<string, int> chunkCounts = new(StringComparer.OrdinalIgnoreCase);
+            // Remover itens dinâmicos anteriores
+            foreach (var item in _dynamicMenuItems)
+            {
+                menu.Items.Remove(item);
+            }
+            _dynamicMenuItems.Clear();
+
             try
             {
-                var connStr = ConfigService.ResolveConnectionString(config);
-                chunkCounts = await Task.Run(() => GetIndexedChunkCounts(connStr));
-            }
-            catch
-            {
-                // Banco indisponível — exibir projetos sem contagem
-            }
+                var config = await Task.Run(() => ConfigService.LoadAsync());
+                var workspace = ConfigService.GetWorkspace(config);
+                var projects = workspace?.Projects ?? [];
 
-            // Submenu de projetos indexados
-            var workspaceName = workspace?.Name ?? config.ActiveWorkspace;
-            var submenuParent = new NativeMenuItem($"Projetos — {workspaceName}");
-            var submenu = new NativeMenu();
-
-            if (projects.Count > 0)
-            {
-                foreach (var project in projects)
+                // Tentar obter contagem de chunks indexados por projeto
+                Dictionary<string, int> chunkCounts = new(StringComparer.OrdinalIgnoreCase);
+                try
                 {
-                    var p = project;
-                    var label = chunkCounts.TryGetValue(p.Name, out var count)
-                        ? $"{p.Name}  ({count} chunks)"
-                        : p.Name;
-
-                    var item = new NativeMenuItem(label);
-                    item.Click += (_, _) => OpenDirectory(p.Path);
-                    submenu.Items.Add(item);
+                    var connStr = ConfigService.ResolveConnectionString(config);
+                    chunkCounts = await Task.Run(() => GetIndexedChunkCounts(connStr));
                 }
-            }
-            else
-            {
-                submenu.Items.Add(new NativeMenuItem("Nenhum projeto configurado") { IsEnabled = false });
-            }
-
-            submenuParent.Menu = submenu;
-            InsertDynamic(menu, 0, submenuParent);
-
-            // Submenu de gerenciamento de workspaces
-            var allWorkspaces = config.Workspaces;
-            var activeWs = config.ActiveWorkspace;
-            var wsParent = new NativeMenuItem($"Workspace: {activeWs}");
-            var wsMenu = new NativeMenu();
-
-            foreach (var ws in allWorkspaces)
-            {
-                var wsName = ws.Name;
-                var isActive = wsName.Equals(activeWs, StringComparison.OrdinalIgnoreCase);
-                var wsItem = new NativeMenuItem(isActive ? $"✓ {wsName}" : $"  {wsName}");
-                if (!isActive)
+                catch
                 {
-                    wsItem.Click += (_, _) => SwitchWorkspace(wsName);
+                    // Banco indisponível — exibir projetos sem contagem
+                }
+
+                // Submenu de projetos indexados
+                var workspaceName = workspace?.Name ?? config.ActiveWorkspace;
+                var submenuParent = new NativeMenuItem($"Projetos — {workspaceName}");
+                var submenu = new NativeMenu();
+
+                if (projects.Count > 0)
+                {
+                    foreach (var project in projects)
+                    {
+                        var p = project;
+                        var label = chunkCounts.TryGetValue(p.Name, out var count)
+                            ? $"{p.Name}  ({count} chunks)"
+                            : p.Name;
+
+                        var item = new NativeMenuItem(label);
+                        item.Click += (_, _) => OpenDirectory(p.Path);
+                        submenu.Items.Add(item);
+                    }
                 }
                 else
                 {
-                    wsItem.IsEnabled = false;
+                    submenu.Items.Add(new NativeMenuItem("Nenhum projeto configurado") { IsEnabled = false });
                 }
-                wsMenu.Items.Add(wsItem);
-            }
 
-            wsParent.Menu = wsMenu;
-            InsertDynamic(menu, 1, wsParent);
-            InsertDynamic(menu, 2, new NativeMenuItemSeparator());
+                submenuParent.Menu = submenu;
+                InsertDynamic(menu, 0, submenuParent);
+
+                // Submenu de gerenciamento de workspaces
+                var allWorkspaces = config.Workspaces;
+                var activeWs = config.ActiveWorkspace;
+                var wsParent = new NativeMenuItem($"Workspace: {activeWs}");
+                var wsMenu = new NativeMenu();
+
+                foreach (var ws in allWorkspaces)
+                {
+                    var wsName = ws.Name;
+                    var isActive = wsName.Equals(activeWs, StringComparison.OrdinalIgnoreCase);
+                    var wsItem = new NativeMenuItem(isActive ? $"✓ {wsName}" : $"  {wsName}");
+                    if (!isActive)
+                    {
+                        wsItem.Click += (_, _) => SwitchWorkspace(wsName);
+                    }
+                    else
+                    {
+                        wsItem.IsEnabled = false;
+                    }
+                    wsMenu.Items.Add(wsItem);
+                }
+
+                wsParent.Menu = wsMenu;
+                InsertDynamic(menu, 1, wsParent);
+                InsertDynamic(menu, 2, new NativeMenuItemSeparator());
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Falha ao carregar projetos no menu: {ex.Message}");
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            Debug.WriteLine($"Falha ao carregar projetos no menu: {ex.Message}");
+            _menuSemaphore.Release();
         }
     }
 
@@ -710,12 +740,73 @@ public partial class App : Application
         }
     }
 
-    public void OnExitClick(object? sender, EventArgs e)
+    private void SetupConfigWatcher()
     {
-        _timer?.Stop();
-        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        try
         {
-            desktop.Shutdown();
+            var directory = ConfigService.ConfigDirectory;
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            _configWatcher = new FileSystemWatcher(directory)
+            {
+                Filter = Path.GetFileName(ConfigService.ConfigPath),
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size
+            };
+
+            _configWatcher.Changed += OnConfigChanged;
+            _configWatcher.Created += OnConfigChanged;
+            _configWatcher.EnableRaisingEvents = true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Falha ao configurar FileSystemWatcher: {ex.Message}");
+        }
+    }
+
+    private void OnConfigChanged(object sender, FileSystemEventArgs e)
+    {
+        // Executar na thread de UI de forma assíncrona
+        Dispatcher.UIThread.Post(async () =>
+        {
+            // Aguardar 250ms para garantir a liberação do arquivo pelo processo escritor
+            await Task.Delay(250);
+            await RefreshProjectsMenuAsync();
+        });
+    }
+
+    public async void OnExitClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            var isActive = await Task.Run(IsMcpProcessActive);
+            if (isActive)
+            {
+                ShowNotification("AI Memory Ativo", "A bandeja foi encerrada. O servidor ai-memory continuará rodando em segundo plano.");
+                await Task.Delay(500); // tempo para o notify-send ser disparado
+            }
+
+            _timer?.Stop();
+            if (_configWatcher is not null)
+            {
+                _configWatcher.EnableRaisingEvents = false;
+                _configWatcher.Dispose();
+            }
+
+            if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                desktop.Shutdown();
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Erro ao sair: {ex.Message}");
+            if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                desktop.Shutdown();
+            }
         }
     }
 }

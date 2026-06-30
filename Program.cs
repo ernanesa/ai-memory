@@ -1,6 +1,8 @@
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using AiMemory.Commands;
+using Avalonia;
+using System.Threading;
 
 var root = new RootCommand("AI Memory Tool - local engineering memory with Ollama + PostgreSQL/pgvector");
 
@@ -135,9 +137,36 @@ root.AddCommand(search);
 root.AddCommand(watch);
 root.AddCommand(doctor);
 root.AddCommand(setup);
+var tray = new Command("tray", "Start the system tray monitor application");
+tray.SetHandler((InvocationContext context) =>
+{
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            AppBuilder.Configure<AiMemory.Tray.App>()
+                .UsePlatformDetect()
+                .WithInterFont()
+                .LogToTrace()
+                .StartWithClassicDesktopLifetime(context.ParseResult.Tokens.Select(t => t.Value).ToArray());
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error starting tray: {ex.Message}");
+        }
+    });
+    if (OperatingSystem.IsWindows())
+    {
+        thread.SetApartmentState(ApartmentState.STA);
+    }
+    thread.Start();
+    thread.Join();
+});
+
 root.AddCommand(workspace);
 root.AddCommand(project);
 root.AddCommand(mcp);
 root.AddCommand(dashboard);
+root.AddCommand(tray);
 
 return await root.InvokeAsync(args);

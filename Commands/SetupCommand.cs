@@ -217,10 +217,20 @@ public static class SetupCommand
                 PromptYesNo($"Pull Ollama model '{model}' if missing?", true))
             {
                 modelsToPull.Add(model);
-            }
+        }
         }
 
-        var installTray = PromptYesNo("Deseja instalar o ícone de bandeja do sistema (System Tray Icon) para inicialização automática?", true);
+        bool hasGui = IsGuiAvailable(state.Platform);
+        bool installTray = false;
+        if (hasGui)
+        {
+            WriteInfo("Interface gráfica detectada. A bandeja do sistema será configurada para inicialização automática.");
+            installTray = true;
+        }
+        else
+        {
+            WriteWarning("Nenhuma interface gráfica detectada neste ambiente. A instalação da bandeja do sistema será ignorada.");
+        }
 
         return new SetupPlan(
             actions.ToArray(),
@@ -306,23 +316,23 @@ public static class SetupCommand
     {
         try
         {
-            WriteInfo("Instalando e configurando aplicativo de bandeja...");
+            WriteInfo("Instalando e configurando aplicativo de bandeja integrado...");
             
             var rootDir = Directory.GetCurrentDirectory(); 
-            var trayProjPath = Path.Combine(rootDir, "AiMemory.Tray", "AiMemory.Tray.csproj");
+            var mainProjPath = Path.Combine(rootDir, "ai-memory.csproj");
             
-            if (!File.Exists(trayProjPath))
+            if (!File.Exists(mainProjPath))
             {
-                var warnMsg = "Diretório do projeto AiMemory.Tray não encontrado. Ignore este passo se não estiver no repositório de desenvolvimento.";
+                var warnMsg = "Diretório do projeto principal 'ai-memory.csproj' não encontrado.";
                 WriteWarning(warnMsg);
                 return SetupStepResult.Warning("Instalar bandeja", warnMsg);
             }
 
-            var publishOutput = Path.Combine(rootDir, "bin", "Publish", "Tray");
+            var publishOutput = Path.Combine(rootDir, "bin", "Publish", "Tool");
             var startInfo = new ProcessStartInfo
             {
                 FileName = "dotnet",
-                Arguments = $"publish \"{trayProjPath}\" -c Release -o \"{publishOutput}\" --self-contained false",
+                Arguments = $"publish \"{mainProjPath}\" -c Release -o \"{publishOutput}\" --self-contained false",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -339,8 +349,12 @@ public static class SetupCommand
             if (process.ExitCode != 0)
             {
                 var error = await process.StandardError.ReadToEndAsync();
-                return SetupStepResult.Warning("Instalar bandeja", $"Falha na compilação do executável da bandeja: {error}");
+                return SetupStepResult.Warning("Instalar bandeja", $"Falha na compilação do executável principal: {error}");
             }
+
+            var execFileName = platform == SetupPlatform.Windows ? "ai-memory.exe" : "ai-memory";
+            var execPath = Path.Combine(publishOutput, execFileName);
+            var iconPath = Path.Combine(rootDir, "Tray", "Assets", "active.png");
 
             if (platform == SetupPlatform.Linux)
             {
@@ -349,13 +363,11 @@ public static class SetupCommand
                 Directory.CreateDirectory(autostartDir);
 
                 var desktopFilePath = Path.Combine(autostartDir, "ai-memory-tray.desktop");
-                var execPath = Path.Combine(publishOutput, "AiMemory.Tray");
-                var iconPath = Path.Combine(rootDir, "AiMemory.Tray", "Assets", "active.png");
 
                 var desktopContent = $"""
 [Desktop Entry]
 Type=Application
-Exec={execPath}
+Exec={execPath} tray
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
@@ -377,12 +389,12 @@ Icon={iconPath}
             {
                 var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
                 var startupPath = Path.Combine(appData, @"Microsoft\Windows\Start Menu\Programs\Startup");
-                var execPath = Path.Combine(publishOutput, "AiMemory.Tray.exe");
                 var shortcutPath = Path.Combine(startupPath, "ai-memory-tray.lnk");
 
                 var psCommand = $"$WshShell = New-Object -comObject WScript.Shell; " +
                                 $"$Shortcut = $WshShell.CreateShortcut('{shortcutPath}'); " +
                                 $"$Shortcut.TargetPath = '{execPath}'; " +
+                                $"$Shortcut.Arguments = 'tray'; " +
                                 $"$Shortcut.WorkingDirectory = '{publishOutput}'; " +
                                 $"$Shortcut.Save()";
 
@@ -402,7 +414,6 @@ Icon={iconPath}
                 Directory.CreateDirectory(agentsDir);
 
                 var plistPath = Path.Combine(agentsDir, "com.aimemory.tray.plist");
-                var execPath = Path.Combine(publishOutput, "AiMemory.Tray");
 
                 var plistContent = $"""
 <?xml version="1.0" encoding="UTF-8"?>
@@ -414,6 +425,7 @@ Icon={iconPath}
     <key>ProgramArguments</key>
     <array>
         <string>{execPath}</string>
+        <string>tray</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -424,6 +436,37 @@ Icon={iconPath}
                 await File.WriteAllTextAsync(plistPath, plistContent);
             }
 
+            // Inicializar a bandeja imediatamente em segundo plano
+            try
+            {
+                if (platform == SetupPlatform.Windows)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = execPath,
+                        Arguments = "tray",
+                        UseShellExecute = true,
+                        WorkingDirectory = publishOutput
+                    });
+                }
+                else
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = execPath,
+                        Arguments = "tray",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WorkingDirectory = publishOutput
+                    });
+                }
+                WriteInfo("Aplicativo de bandeja iniciado em segundo plano.");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Falha ao iniciar bandeja imediatamente: {ex.Message}");
+            }
+
             var successMsg = $"Bandeja instalada e configurada com sucesso para autostart no {platform}!";
             WriteSuccess(successMsg);
             return SetupStepResult.Success("Instalar bandeja", successMsg);
@@ -432,6 +475,28 @@ Icon={iconPath}
         {
             return SetupStepResult.Warning("Instalar bandeja", $"Falha ao configurar bandeja: {ex.Message}");
         }
+    }
+
+    private static bool IsGuiAvailable(SetupPlatform platform)
+    {
+        try
+        {
+            if (platform == SetupPlatform.Windows || platform == SetupPlatform.MacOs)
+            {
+                return Environment.UserInteractive;
+            }
+            if (platform == SetupPlatform.Linux)
+            {
+                var display = Environment.GetEnvironmentVariable("DISPLAY");
+                var waylandDisplay = Environment.GetEnvironmentVariable("WAYLAND_DISPLAY");
+                return !string.IsNullOrWhiteSpace(display) || !string.IsNullOrWhiteSpace(waylandDisplay);
+            }
+        }
+        catch
+        {
+            // Fallback em caso de erro
+        }
+        return false;
     }
 
     private static async Task<SetupStepResult> CreateDatabaseIfNeededAsync(AiMemoryConfig config)

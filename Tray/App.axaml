@@ -7,7 +7,7 @@
     </Application.Styles>
     <TrayIcon.Icons>
         <TrayIcons>
-            <TrayIcon ToolTipText="AI Memory: Idle">
+            <TrayIcon ToolTipText="AI Memory: Idle" IsVisible="True">
                 <TrayIcon.Menu>
                     <NativeMenu>
                         <NativeMenuItem Header="Indexar Workspace" Click="OnIndexNowClick" />
