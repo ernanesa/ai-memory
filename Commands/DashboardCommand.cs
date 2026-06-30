@@ -4,258 +4,258 @@ using System.Text.Json;
 using AiMemory.Configuration;
 using Npgsql;
 
-namespace AiMemory.Commands;
-
-public static class DashboardCommand
+namespace AiMemory.Commands
 {
+  public static class DashboardCommand
+  {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = false
+      PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+      WriteIndented = false
     };
 
     public static async Task RunAsync(string? workspace, string? project, string? db)
     {
-        var config = await ConfigService.LoadAsync();
-        await using var repository = new DashboardRepository(ConfigService.ResolveConnectionString(config, db));
+      var config = await ConfigService.LoadAsync();
+      await using var repository = new DashboardRepository(ConfigService.ResolveConnectionString(config, db));
 
-        var overview = await repository.GetOverviewAsync(workspace, project);
-        var workspaces = await repository.GetWorkspacesAsync(workspace, project);
-        var projects = await repository.GetProjectsAsync(workspace, project, limit: 12);
-        var health = await repository.GetHealthAsync(workspace, project);
+      var overview = await repository.GetOverviewAsync(workspace, project);
+      var workspaces = await repository.GetWorkspacesAsync(workspace, project);
+      var projects = await repository.GetProjectsAsync(workspace, project, limit: 12);
+      var health = await repository.GetHealthAsync(workspace, project);
 
-        Console.WriteLine("AI Memory Dashboard");
-        Console.WriteLine();
-        Console.WriteLine($"Scope: {FormatScope(workspace, project)}");
-        Console.WriteLine($"Last update: {FormatDate(overview.LastUpdated)}");
-        Console.WriteLine();
-        Console.WriteLine("Memory");
-        Console.WriteLine($"  Workspaces:        {overview.WorkspaceCount:N0}");
-        Console.WriteLine($"  Projects:          {overview.ProjectCount:N0}");
-        Console.WriteLine($"  Files:             {overview.FileCount:N0}");
-        Console.WriteLine($"  Chunks:            {overview.ChunkCount:N0}");
-        Console.WriteLine($"  Business rules:    {overview.BusinessRuleCount:N0}");
-        Console.WriteLine($"  Knowledge records: {overview.KnowledgeCount:N0}");
-        Console.WriteLine();
-        Console.WriteLine("Health");
-        Console.WriteLine($"  Chunks without embedding: {health.ChunksWithoutEmbedding:N0}");
-        Console.WriteLine($"  Projects without chunks:  {health.ProjectsWithoutChunks:N0}");
-        Console.WriteLine($"  Duplicate project names:  {health.DuplicateProjectNames:N0}");
-        Console.WriteLine($"  Broken chunk references:  {health.BrokenChunkReferences:N0}");
-        Console.WriteLine($"  Candidate rules:          {health.CandidateBusinessRules:N0}");
-        Console.WriteLine($"  Rules without evidence:   {health.BusinessRulesWithoutEvidence:N0}");
-        Console.WriteLine($"  Rules without source:     {health.BusinessRulesWithoutSource:N0}");
-        Console.WriteLine($"  Candidate knowledge:      {health.CandidateKnowledge:N0}");
-        Console.WriteLine($"  Knowledge without evidence: {health.KnowledgeWithoutEvidence:N0}");
-        Console.WriteLine($"  Knowledge without source: {health.KnowledgeWithoutSource:N0}");
+      Console.WriteLine("AI Memory Dashboard");
+      Console.WriteLine();
+      Console.WriteLine($"Scope: {FormatScope(workspace, project)}");
+      Console.WriteLine($"Last update: {FormatDate(overview.LastUpdated)}");
+      Console.WriteLine();
+      Console.WriteLine("Memory");
+      Console.WriteLine($"  Workspaces:        {overview.WorkspaceCount:N0}");
+      Console.WriteLine($"  Projects:          {overview.ProjectCount:N0}");
+      Console.WriteLine($"  Files:             {overview.FileCount:N0}");
+      Console.WriteLine($"  Chunks:            {overview.ChunkCount:N0}");
+      Console.WriteLine($"  Business rules:    {overview.BusinessRuleCount:N0}");
+      Console.WriteLine($"  Knowledge records: {overview.KnowledgeCount:N0}");
+      Console.WriteLine();
+      Console.WriteLine("Health");
+      Console.WriteLine($"  Chunks without embedding: {health.ChunksWithoutEmbedding:N0}");
+      Console.WriteLine($"  Projects without chunks:  {health.ProjectsWithoutChunks:N0}");
+      Console.WriteLine($"  Duplicate project names:  {health.DuplicateProjectNames:N0}");
+      Console.WriteLine($"  Broken chunk references:  {health.BrokenChunkReferences:N0}");
+      Console.WriteLine($"  Candidate rules:          {health.CandidateBusinessRules:N0}");
+      Console.WriteLine($"  Rules without evidence:   {health.BusinessRulesWithoutEvidence:N0}");
+      Console.WriteLine($"  Rules without source:     {health.BusinessRulesWithoutSource:N0}");
+      Console.WriteLine($"  Candidate knowledge:      {health.CandidateKnowledge:N0}");
+      Console.WriteLine($"  Knowledge without evidence: {health.KnowledgeWithoutEvidence:N0}");
+      Console.WriteLine($"  Knowledge without source: {health.KnowledgeWithoutSource:N0}");
 
-        if (workspaces.Count > 0)
+      if (workspaces.Count > 0)
+      {
+        Console.WriteLine();
+        Console.WriteLine("Workspaces");
+        foreach (var item in workspaces)
         {
-            Console.WriteLine();
-            Console.WriteLine("Workspaces");
-            foreach (var item in workspaces)
-            {
-                Console.WriteLine($"  {item.Name,-24} {item.ProjectCount,4:N0} projects  {item.ChunkCount,8:N0} chunks  updated {FormatDate(item.LastUpdated)}");
-            }
+          Console.WriteLine($"  {item.Name,-24} {item.ProjectCount,4:N0} projects  {item.ChunkCount,8:N0} chunks  updated {FormatDate(item.LastUpdated)}");
         }
+      }
 
-        if (projects.Count > 0)
+      if (projects.Count > 0)
+      {
+        Console.WriteLine();
+        Console.WriteLine("Projects");
+        foreach (var item in projects)
         {
-            Console.WriteLine();
-            Console.WriteLine("Projects");
-            foreach (var item in projects)
-            {
-                Console.WriteLine($"  {item.Name,-32} {item.ChunkCount,8:N0} chunks  {item.FileCount,5:N0} files  {string.Join(", ", item.Workspaces)}");
-            }
+          Console.WriteLine($"  {item.Name,-32} {item.ChunkCount,8:N0} chunks  {item.FileCount,5:N0} files  {string.Join(", ", item.Workspaces)}");
         }
+      }
     }
 
     public static async Task ServeAsync(string? workspace, string? project, string? db, int port)
     {
-        var config = await ConfigService.LoadAsync();
-        var connectionString = ConfigService.ResolveConnectionString(config, db);
-        using var listener = new HttpListener();
-        var prefix = $"http://localhost:{port}/";
-        listener.Prefixes.Add(prefix);
-        listener.Start();
+      var config = await ConfigService.LoadAsync();
+      var connectionString = ConfigService.ResolveConnectionString(config, db);
+      using var listener = new HttpListener();
+      var prefix = $"http://localhost:{port}/";
+      listener.Prefixes.Add(prefix);
+      listener.Start();
 
-        Console.WriteLine($"AI Memory dashboard running at {prefix}");
-        Console.WriteLine("Press Ctrl+C to stop.");
+      Console.WriteLine($"AI Memory dashboard running at {prefix}");
+      Console.WriteLine("Press Ctrl+C to stop.");
 
-        var stopping = new TaskCompletionSource();
-        Console.CancelKeyPress += (_, args) =>
+      var stopping = new TaskCompletionSource();
+      Console.CancelKeyPress += (_, args) =>
+      {
+        args.Cancel = true;
+        stopping.TrySetResult();
+        listener.Stop();
+      };
+
+      while (!stopping.Task.IsCompleted)
+      {
+        HttpListenerContext context;
+        try
         {
-            args.Cancel = true;
-            stopping.TrySetResult();
-            listener.Stop();
-        };
-
-        while (!stopping.Task.IsCompleted)
-        {
-            HttpListenerContext context;
-            try
-            {
-                context = await listener.GetContextAsync();
-            }
-            catch (HttpListenerException) when (stopping.Task.IsCompleted || !listener.IsListening)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await HandleRequestAsync(context, connectionString, workspace, project);
-                }
-                catch (Exception ex)
-                {
-                    await WriteJsonAsync(context.Response, new { error = ex.Message }, HttpStatusCode.InternalServerError);
-                }
-            });
+          context = await listener.GetContextAsync();
         }
+        catch (HttpListenerException) when (stopping.Task.IsCompleted || !listener.IsListening)
+        {
+          break;
+        }
+        catch (ObjectDisposedException)
+        {
+          break;
+        }
+
+        _ = Task.Run(async () =>
+        {
+          try
+          {
+            await HandleRequestAsync(context, connectionString, workspace, project);
+          }
+          catch (Exception ex)
+          {
+            await WriteJsonAsync(context.Response, new { error = ex.Message }, HttpStatusCode.InternalServerError);
+          }
+        });
+      }
     }
 
     private static async Task HandleRequestAsync(HttpListenerContext context, string connectionString, string? defaultWorkspace, string? defaultProject)
     {
-        var request = context.Request;
-        var path = request.Url?.AbsolutePath.TrimEnd('/') ?? "";
-        if (string.IsNullOrEmpty(path))
-        {
-            path = "/";
-        }
+      var request = context.Request;
+      var path = request.Url?.AbsolutePath.TrimEnd('/') ?? "";
+      if (string.IsNullOrEmpty(path))
+      {
+        path = "/";
+      }
 
-        if (path == "/")
-        {
-            await WriteHtmlAsync(context.Response, Html);
-            return;
-        }
+      if (path == "/")
+      {
+        await WriteHtmlAsync(context.Response, Html);
+        return;
+      }
 
-        if (!path.StartsWith("/api/", StringComparison.Ordinal))
-        {
-            await WriteTextAsync(context.Response, "Not found", "text/plain; charset=utf-8", HttpStatusCode.NotFound);
-            return;
-        }
+      if (!path.StartsWith("/api/", StringComparison.Ordinal))
+      {
+        await WriteTextAsync(context.Response, "Not found", "text/plain; charset=utf-8", HttpStatusCode.NotFound);
+        return;
+      }
 
-        var query = ParseQuery(request.Url?.Query);
-        var workspace = FirstNonEmpty(GetQuery(query, "workspace"), defaultWorkspace);
-        var project = FirstNonEmpty(GetQuery(query, "project"), defaultProject);
-        await using var repository = new DashboardRepository(connectionString);
+      var query = ParseQuery(request.Url?.Query);
+      var workspace = FirstNonEmpty(GetQuery(query, "workspace"), defaultWorkspace);
+      var project = FirstNonEmpty(GetQuery(query, "project"), defaultProject);
+      await using var repository = new DashboardRepository(connectionString);
 
-        object payload = path switch
-        {
-            "/api/overview" => await repository.GetOverviewAsync(workspace, project),
-            "/api/workspaces" => await repository.GetWorkspacesAsync(workspace, project),
-            "/api/projects" => await repository.GetProjectsAsync(workspace, project, GetLimit(query, 100, 1, 500)),
-            "/api/chunks" => await repository.GetChunksAsync(workspace, project, GetQuery(query, "q"), GetLimit(query, 100, 1, 500)),
-            "/api/business-rules" => await repository.GetBusinessRulesAsync(workspace, project, GetQuery(query, "q"), GetLimit(query, 100, 1, 500)),
-            "/api/knowledge" => await repository.GetKnowledgeAsync(workspace, project, GetQuery(query, "q"), GetLimit(query, 100, 1, 500)),
-            "/api/health" => await repository.GetHealthAsync(workspace, project),
-            _ => new { error = "Unknown endpoint." }
-        };
+      object payload = path switch
+      {
+        "/api/overview" => await repository.GetOverviewAsync(workspace, project),
+        "/api/workspaces" => await repository.GetWorkspacesAsync(workspace, project),
+        "/api/projects" => await repository.GetProjectsAsync(workspace, project, GetLimit(query, 100, 1, 500)),
+        "/api/chunks" => await repository.GetChunksAsync(workspace, project, GetQuery(query, "q"), GetLimit(query, 100, 1, 500)),
+        "/api/business-rules" => await repository.GetBusinessRulesAsync(workspace, project, GetQuery(query, "q"), GetLimit(query, 100, 1, 500)),
+        "/api/knowledge" => await repository.GetKnowledgeAsync(workspace, project, GetQuery(query, "q"), GetLimit(query, 100, 1, 500)),
+        "/api/health" => await repository.GetHealthAsync(workspace, project),
+        _ => new { error = "Unknown endpoint." }
+      };
 
-        await WriteJsonAsync(context.Response, payload);
+      await WriteJsonAsync(context.Response, payload);
     }
 
     private static string FormatScope(string? workspace, string? project)
     {
-        return (Normalize(workspace), Normalize(project)) switch
-        {
-            (null, null) => "all workspaces and projects",
-            (string w, null) => $"workspace {w}",
-            (null, string p) => $"project {p}",
-            (string w, string p) => $"workspace {w}, project {p}"
-        };
+      return (Normalize(workspace), Normalize(project)) switch
+      {
+        (null, null) => "all workspaces and projects",
+        (string w, null) => $"workspace {w}",
+        (null, string p) => $"project {p}",
+        (string w, string p) => $"workspace {w}, project {p}"
+      };
     }
 
     private static string FormatDate(DateTime? value)
     {
-        return value is null ? "never" : value.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+      return value is null ? "never" : value.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
     }
 
     private static async Task WriteHtmlAsync(HttpListenerResponse response, string html)
     {
-        await WriteTextAsync(response, html, "text/html; charset=utf-8", HttpStatusCode.OK);
+      await WriteTextAsync(response, html, "text/html; charset=utf-8", HttpStatusCode.OK);
     }
 
     private static async Task WriteJsonAsync(HttpListenerResponse response, object payload, HttpStatusCode statusCode = HttpStatusCode.OK)
     {
-        var json = JsonSerializer.Serialize(payload, JsonOptions);
-        await WriteTextAsync(response, json, "application/json; charset=utf-8", statusCode);
+      var json = JsonSerializer.Serialize(payload, JsonOptions);
+      await WriteTextAsync(response, json, "application/json; charset=utf-8", statusCode);
     }
 
     private static async Task WriteTextAsync(HttpListenerResponse response, string text, string contentType, HttpStatusCode statusCode)
     {
-        var bytes = Encoding.UTF8.GetBytes(text);
-        response.StatusCode = (int)statusCode;
-        response.ContentType = contentType;
-        response.ContentLength64 = bytes.Length;
-        await response.OutputStream.WriteAsync(bytes);
-        response.Close();
+      var bytes = Encoding.UTF8.GetBytes(text);
+      response.StatusCode = (int)statusCode;
+      response.ContentType = contentType;
+      response.ContentLength64 = bytes.Length;
+      await response.OutputStream.WriteAsync(bytes);
+      response.Close();
     }
 
     private static Dictionary<string, string> ParseQuery(string? query)
     {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return result;
-        }
-
-        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var pieces = part.Split('=', 2);
-            var key = Uri.UnescapeDataString(pieces[0].Replace('+', ' '));
-            var value = pieces.Length == 2 ? Uri.UnescapeDataString(pieces[1].Replace('+', ' ')) : "";
-            result[key] = value;
-        }
-
+      var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+      if (string.IsNullOrWhiteSpace(query))
+      {
         return result;
+      }
+
+      foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+      {
+        var pieces = part.Split('=', 2);
+        var key = Uri.UnescapeDataString(pieces[0].Replace('+', ' '));
+        var value = pieces.Length == 2 ? Uri.UnescapeDataString(pieces[1].Replace('+', ' ')) : "";
+        result[key] = value;
+      }
+
+      return result;
     }
 
     private static int GetLimit(Dictionary<string, string> query, int defaultValue, int min, int max)
     {
-        if (!query.TryGetValue("limit", out var raw) || !int.TryParse(raw, out var value))
-        {
-            return defaultValue;
-        }
+      if (!query.TryGetValue("limit", out var raw) || !int.TryParse(raw, out var value))
+      {
+        return defaultValue;
+      }
 
-        return Math.Clamp(value, min, max);
+      return Math.Clamp(value, min, max);
     }
 
     private static string? GetQuery(Dictionary<string, string> query, string key)
     {
-        return query.TryGetValue(key, out var value) ? Normalize(value) : null;
+      return query.TryGetValue(key, out var value) ? Normalize(value) : null;
     }
 
     private static string? FirstNonEmpty(params string?[] values)
     {
-        return values.Select(Normalize).FirstOrDefault(value => value is not null);
+      return values.Select(Normalize).FirstOrDefault(value => value is not null);
     }
 
     private static string? Normalize(string? value)
     {
-        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+      return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
     private sealed class DashboardRepository(string connectionString) : IAsyncDisposable
     {
-        private readonly NpgsqlConnection _connection = new(connectionString);
+      private readonly NpgsqlConnection _connection = new(connectionString);
 
-        public async ValueTask DisposeAsync()
-        {
-            await _connection.DisposeAsync();
-        }
+      public async ValueTask DisposeAsync()
+      {
+        await _connection.DisposeAsync();
+      }
 
-        public async Task<DashboardOverview> GetOverviewAsync(string? workspace, string? project)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+      public async Task<DashboardOverview> GetOverviewAsync(string? workspace, string? project)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id
                 FROM ai_projects p
@@ -278,25 +278,25 @@ public static class DashboardCommand
                 (SELECT count(*) FROM ai_knowledge k JOIN filtered_projects fp ON fp.id = k.project_id) AS knowledge,
                 (SELECT max(c.updated_at) FROM ai_chunks c JOIN filtered_projects fp ON fp.id = c.project_id) AS last_updated;
             """;
-            AddScopeParameters(cmd, workspace, project);
+        AddScopeParameters(cmd, workspace, project);
 
-            await using var reader = await cmd.ExecuteReaderAsync();
-            await reader.ReadAsync();
-            return new DashboardOverview(
-                reader.GetInt64(0),
-                reader.GetInt64(1),
-                reader.GetInt64(2),
-                reader.GetInt64(3),
-                reader.GetInt64(4),
-                reader.GetInt64(5),
-                GetNullableDateTime(reader, 6));
-        }
+        await using var reader = await cmd.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        return new DashboardOverview(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4),
+            reader.GetInt64(5),
+            GetNullableDateTime(reader, 6));
+      }
 
-        public async Task<IReadOnlyList<WorkspaceSummary>> GetWorkspacesAsync(string? workspace, string? project)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+      public async Task<IReadOnlyList<WorkspaceSummary>> GetWorkspacesAsync(string? workspace, string? project)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id, p.name, p.root_path
                 FROM ai_projects p
@@ -322,29 +322,29 @@ public static class DashboardCommand
             GROUP BY w.name
             ORDER BY w.name;
             """;
-            AddScopeParameters(cmd, workspace, project);
+        AddScopeParameters(cmd, workspace, project);
 
-            var rows = new List<WorkspaceSummary>();
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rows.Add(new WorkspaceSummary(
-                    reader.GetString(0),
-                    reader.GetInt64(1),
-                    reader.GetInt64(2),
-                    reader.GetInt64(3),
-                    reader.GetInt64(4),
-                    GetNullableDateTime(reader, 5)));
-            }
-
-            return rows;
+        var rows = new List<WorkspaceSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+          rows.Add(new WorkspaceSummary(
+              reader.GetString(0),
+              reader.GetInt64(1),
+              reader.GetInt64(2),
+              reader.GetInt64(3),
+              reader.GetInt64(4),
+              GetNullableDateTime(reader, 5)));
         }
 
-        public async Task<IReadOnlyList<ProjectSummary>> GetProjectsAsync(string? workspace, string? project, int limit)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+        return rows;
+      }
+
+      public async Task<IReadOnlyList<ProjectSummary>> GetProjectsAsync(string? workspace, string? project, int limit)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id, p.name, p.root_path
                 FROM ai_projects p
@@ -372,33 +372,33 @@ public static class DashboardCommand
             ORDER BY count(DISTINCT c.id) DESC, fp.name
             LIMIT $3;
             """;
-            AddScopeParameters(cmd, workspace, project);
-            cmd.Parameters.AddWithValue(limit);
+        AddScopeParameters(cmd, workspace, project);
+        cmd.Parameters.AddWithValue(limit);
 
-            var rows = new List<ProjectSummary>();
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rows.Add(new ProjectSummary(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    SplitList(reader.GetString(2), " | "),
-                    reader.GetInt64(3),
-                    reader.GetInt64(4),
-                    reader.GetInt64(5),
-                    reader.GetInt64(6),
-                    GetNullableDateTime(reader, 7),
-                    SplitList(reader.GetString(8), ", ")));
-            }
-
-            return rows;
+        var rows = new List<ProjectSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+          rows.Add(new ProjectSummary(
+              reader.GetString(0),
+              reader.GetString(1),
+              SplitList(reader.GetString(2), " | "),
+              reader.GetInt64(3),
+              reader.GetInt64(4),
+              reader.GetInt64(5),
+              reader.GetInt64(6),
+              GetNullableDateTime(reader, 7),
+              SplitList(reader.GetString(8), ", ")));
         }
 
-        public async Task<IReadOnlyList<ChunkSummary>> GetChunksAsync(string? workspace, string? project, string? search, int limit)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+        return rows;
+      }
+
+      public async Task<IReadOnlyList<ChunkSummary>> GetChunksAsync(string? workspace, string? project, string? search, int limit)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id, p.name
                 FROM ai_projects p
@@ -429,34 +429,34 @@ public static class DashboardCommand
             ORDER BY c.updated_at DESC
             LIMIT $4;
             """;
-            AddScopeParameters(cmd, workspace, project);
-            cmd.Parameters.AddWithValue((object?)Normalize(search) ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(limit);
+        AddScopeParameters(cmd, workspace, project);
+        cmd.Parameters.AddWithValue((object?)Normalize(search) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(limit);
 
-            var rows = new List<ChunkSummary>();
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rows.Add(new ChunkSummary(
-                    reader.GetString(0),
-                    SplitList(reader.GetString(1), " | "),
-                    reader.GetString(2),
-                    GetNullableString(reader, 3),
-                    GetNullableString(reader, 4),
-                    GetNullableString(reader, 5),
-                    reader.GetInt64(6),
-                    reader.GetBoolean(7),
-                    GetNullableDateTime(reader, 8)));
-            }
-
-            return rows;
+        var rows = new List<ChunkSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+          rows.Add(new ChunkSummary(
+              reader.GetString(0),
+              SplitList(reader.GetString(1), " | "),
+              reader.GetString(2),
+              GetNullableString(reader, 3),
+              GetNullableString(reader, 4),
+              GetNullableString(reader, 5),
+              reader.GetInt64(6),
+              reader.GetBoolean(7),
+              GetNullableDateTime(reader, 8)));
         }
 
-        public async Task<IReadOnlyList<BusinessRuleSummary>> GetBusinessRulesAsync(string? workspace, string? project, string? search, int limit)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+        return rows;
+      }
+
+      public async Task<IReadOnlyList<BusinessRuleSummary>> GetBusinessRulesAsync(string? workspace, string? project, string? search, int limit)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id, p.name
                 FROM ai_projects p
@@ -479,35 +479,35 @@ public static class DashboardCommand
             ORDER BY r.updated_at DESC
             LIMIT $4;
             """;
-            AddScopeParameters(cmd, workspace, project);
-            cmd.Parameters.AddWithValue((object?)Normalize(search) ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(limit);
+        AddScopeParameters(cmd, workspace, project);
+        cmd.Parameters.AddWithValue((object?)Normalize(search) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(limit);
 
-            var rows = new List<BusinessRuleSummary>();
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rows.Add(new BusinessRuleSummary(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    GetNullableString(reader, 3),
-                    GetNullableString(reader, 4),
-                    reader.GetString(5),
-                    GetNullableString(reader, 6),
-                    reader.IsDBNull(7) ? null : reader.GetDecimal(7),
-                    GetNullableDateTime(reader, 8),
-                    GetNullableDateTime(reader, 9)));
-            }
-
-            return rows;
+        var rows = new List<BusinessRuleSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+          rows.Add(new BusinessRuleSummary(
+              reader.GetString(0),
+              reader.GetString(1),
+              reader.GetString(2),
+              GetNullableString(reader, 3),
+              GetNullableString(reader, 4),
+              reader.GetString(5),
+              GetNullableString(reader, 6),
+              reader.IsDBNull(7) ? null : reader.GetDecimal(7),
+              GetNullableDateTime(reader, 8),
+              GetNullableDateTime(reader, 9)));
         }
 
-        public async Task<IReadOnlyList<KnowledgeSummary>> GetKnowledgeAsync(string? workspace, string? project, string? search, int limit)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+        return rows;
+      }
+
+      public async Task<IReadOnlyList<KnowledgeSummary>> GetKnowledgeAsync(string? workspace, string? project, string? search, int limit)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id, p.name
                 FROM ai_projects p
@@ -531,35 +531,35 @@ public static class DashboardCommand
             ORDER BY k.updated_at DESC
             LIMIT $4;
             """;
-            AddScopeParameters(cmd, workspace, project);
-            cmd.Parameters.AddWithValue((object?)Normalize(search) ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(limit);
+        AddScopeParameters(cmd, workspace, project);
+        cmd.Parameters.AddWithValue((object?)Normalize(search) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(limit);
 
-            var rows = new List<KnowledgeSummary>();
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rows.Add(new KnowledgeSummary(
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.GetString(3),
-                    GetNullableString(reader, 4),
-                    GetNullableString(reader, 5),
-                    reader.GetString(6),
-                    GetNullableString(reader, 7),
-                    reader.IsDBNull(8) ? null : reader.GetDecimal(8),
-                    GetNullableDateTime(reader, 9)));
-            }
-
-            return rows;
+        var rows = new List<KnowledgeSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+          rows.Add(new KnowledgeSummary(
+              reader.GetString(0),
+              reader.GetString(1),
+              reader.GetString(2),
+              reader.GetString(3),
+              GetNullableString(reader, 4),
+              GetNullableString(reader, 5),
+              reader.GetString(6),
+              GetNullableString(reader, 7),
+              reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+              GetNullableDateTime(reader, 9)));
         }
 
-        public async Task<HealthSummary> GetHealthAsync(string? workspace, string? project)
-        {
-            await EnsureOpenAsync();
-            await using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+        return rows;
+      }
+
+      public async Task<HealthSummary> GetHealthAsync(string? workspace, string? project)
+      {
+        await EnsureOpenAsync();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
             WITH filtered_projects AS (
                 SELECT DISTINCT p.id, p.name
                 FROM ai_projects p
@@ -580,58 +580,58 @@ public static class DashboardCommand
                 (SELECT count(*) FROM ai_knowledge k JOIN filtered_projects fp ON fp.id = k.project_id WHERE k.status <> 'rejected' AND NULLIF(btrim(COALESCE(k.evidence, '')), '') IS NULL) AS knowledge_without_evidence,
                 (SELECT count(*) FROM ai_knowledge k JOIN filtered_projects fp ON fp.id = k.project_id WHERE k.status <> 'rejected' AND NULLIF(btrim(COALESCE(k.source, '')), '') IS NULL) AS knowledge_without_source;
             """;
-            AddScopeParameters(cmd, workspace, project);
+        AddScopeParameters(cmd, workspace, project);
 
-            await using var reader = await cmd.ExecuteReaderAsync();
-            await reader.ReadAsync();
-            return new HealthSummary(
-                reader.GetInt64(0),
-                reader.GetInt64(1),
-                reader.GetInt64(2),
-                reader.GetInt64(3),
-                reader.GetInt64(4),
-                reader.GetInt64(5),
-                reader.GetInt64(6),
-                reader.GetInt64(7),
-                reader.GetInt64(8),
-                reader.GetInt64(9));
-        }
+        await using var reader = await cmd.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        return new HealthSummary(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4),
+            reader.GetInt64(5),
+            reader.GetInt64(6),
+            reader.GetInt64(7),
+            reader.GetInt64(8),
+            reader.GetInt64(9));
+      }
 
-        private async Task EnsureOpenAsync()
+      private async Task EnsureOpenAsync()
+      {
+        if (_connection.State != System.Data.ConnectionState.Open)
         {
-            if (_connection.State != System.Data.ConnectionState.Open)
-            {
-                await _connection.OpenAsync();
-            }
+          await _connection.OpenAsync();
         }
+      }
 
-        private static void AddScopeParameters(NpgsqlCommand cmd, string? workspace, string? project)
-        {
-            cmd.Parameters.AddWithValue((object?)Normalize(workspace) ?? DBNull.Value);
-            cmd.Parameters.AddWithValue((object?)Normalize(project) ?? DBNull.Value);
-        }
+      private static void AddScopeParameters(NpgsqlCommand cmd, string? workspace, string? project)
+      {
+        cmd.Parameters.AddWithValue((object?)Normalize(workspace) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue((object?)Normalize(project) ?? DBNull.Value);
+      }
 
-        private static string? Normalize(string? value)
-        {
-            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-        }
+      private static string? Normalize(string? value)
+      {
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+      }
 
-        private static string? GetNullableString(NpgsqlDataReader reader, int ordinal)
-        {
-            return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-        }
+      private static string? GetNullableString(NpgsqlDataReader reader, int ordinal)
+      {
+        return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+      }
 
-        private static DateTime? GetNullableDateTime(NpgsqlDataReader reader, int ordinal)
-        {
-            return reader.IsDBNull(ordinal) ? null : reader.GetDateTime(ordinal);
-        }
+      private static DateTime? GetNullableDateTime(NpgsqlDataReader reader, int ordinal)
+      {
+        return reader.IsDBNull(ordinal) ? null : reader.GetDateTime(ordinal);
+      }
 
-        private static IReadOnlyList<string> SplitList(string value, string separator)
-        {
-            return string.IsNullOrWhiteSpace(value)
-                ? []
-                : value.Split(separator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        }
+      private static IReadOnlyList<string> SplitList(string value, string separator)
+      {
+        return string.IsNullOrWhiteSpace(value)
+            ? []
+            : value.Split(separator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+      }
     }
 
     public sealed record DashboardOverview(
@@ -1013,4 +1013,5 @@ public static class DashboardCommand
 </body>
 </html>
 """;
+  }
 }

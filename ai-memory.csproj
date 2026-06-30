@@ -4,12 +4,38 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- NuGet Tool packaging -->
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>ai-memory</ToolCommandName>
     <PackageId>AiMemory.Tool</PackageId>
     <Version>0.1.5</Version>
+
+    <!-- NuGet package metadata -->
     <Authors>Engineering Team</Authors>
-    <Description>Local AI engineering memory using Ollama, PostgreSQL and pgvector.</Description>
+    <Company>Engineering Team</Company>
+    <Product>AI Memory Tool</Product>
+    <Description>Local AI engineering memory using Ollama, PostgreSQL and pgvector. Indexes code, business rules and architectural knowledge for AI agents via MCP (Model Context Protocol).</Description>
+    <PackageDescription>AI Memory Tool is a .NET global tool that creates a local, searchable engineering memory for AI coding assistants. It indexes code, business rules and architectural knowledge using Ollama (bge-m3 embeddings) and PostgreSQL+pgvector, exposing them to IDEs (Rider, VS Code, Cursor, Codex) via MCP (Model Context Protocol) over stdio.
+
+Key features:
+- Multi-project/workspace indexing with Roslyn (C# AST) and semantic chunking
+- Hybrid vector+full-text search with Reciprocal Rank Fusion (RRF)
+- Code Graph RAG: symbol caller/callee/hierarchy traversal
+- Business rules and architectural knowledge extraction (heuristic + LLM semantic)
+- System tray monitor (Avalonia UI) with autostart management
+- Cross-platform: Linux, macOS, Windows</PackageDescription>
+    <PackageTags>ai;memory;mcp;ollama;pgvector;embeddings;rag;dotnet-tool;engineering;csharp</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReleaseNotes>Tray setup management with install/update/remove/status commands, macOS LaunchAgent hardening, NuGet package metadata, and MCP version alignment.</PackageReleaseNotes>
+    <Copyright>Copyright © 2024-2026 Engineering Team</Copyright>
+    <NeutralLanguage>pt-BR</NeutralLanguage>
+    <AssemblyVersion>0.1.5.0</AssemblyVersion>
+    <FileVersion>0.1.5.0</FileVersion>
+    <InformationalVersion>0.1.5</InformationalVersion>
+
+    <!-- Build settings -->
     <DefaultItemExcludes>$(DefaultItemExcludes);AiMemory.Tray/**</DefaultItemExcludes>
   </PropertyGroup>
 
@@ -24,6 +50,7 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.0.10" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.10" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.0.10" />
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,6 +59,7 @@
 
   <ItemGroup>
     <None Include="sql/*.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>

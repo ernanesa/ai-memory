@@ -38,21 +38,43 @@ bge-m3          pgvector
 
 ---
 
-## 1. Instalação da tool
+## 1. Instalação, atualização e remoção da tool
 
-Na raiz do projeto:
+O pacote é distribuído como **.NET global tool** com `PackageId` `AiMemory.Tool` e comando `ai-memory`.
+
+Para gerar o pacote localmente:
 
 ```bash
 dotnet pack -c Release
+```
+
+Instalar a partir do pacote local gerado em `bin/Release`:
+
+```bash
 dotnet tool install --global --add-source ./bin/Release AiMemory.Tool
 ```
 
-Atualizar após alterações:
+Instalar uma versão específica a partir de um feed NuGet empresarial:
 
 ```bash
-dotnet pack -c Release
-dotnet tool update --global --add-source ./bin/Release AiMemory.Tool
+dotnet tool install --global AiMemory.Tool --version 0.1.5 --add-source <feed-nuget-da-empresa>
 ```
+
+Atualizar a versão instalada:
+
+```bash
+dotnet tool update --global AiMemory.Tool --version 0.1.5 --add-source <feed-nuget-da-empresa>
+ai-memory tray update
+```
+
+Remover a tool:
+
+```bash
+ai-memory tray remove
+dotnet tool uninstall --global AiMemory.Tool
+```
+
+> Rode `ai-memory tray update` depois de atualizar a tool para recriar o autostart da bandeja apontando para o shim/executável atual.
 
 ## 2. Setup
 
@@ -114,21 +136,58 @@ Criamos uma aplicação visual complementar para a barra de tarefas/bandeja do s
   * **macOS**: Usa o `osascript` (AppleScript).
   * **Windows 11**: Usa balões de bandeja acionados por scripts ocultos em `PowerShell`.
 
-### Como instalar e executar a bandeja:
+### Como gerenciar e executar a bandeja (System Tray):
 
-A instalação e a configuração de inicialização automática (autostart) são integradas diretamente ao comando principal de configuração do sistema:
+A instalação e a configuração de inicialização automática (autostart) são integradas diretamente ao comando de setup principal do sistema (`ai-memory setup`).
 
+No entanto, com foco em facilitar a distribuição via **NuGet** e permitir controle isolado da bandeja, a CLI disponibiliza o comando `ai-memory tray` e seus subcomandos:
+
+#### 1. Executar a bandeja manualmente
+Você pode abrir o monitor da bandeja do sistema a qualquer momento executando:
 ```bash
-ai-memory setup
+ai-memory tray
 ```
 
-Durante o fluxo, o setup perguntará: *"Deseja instalar o ícone de bandeja do sistema (System Tray Icon) para inicialização automática?"*. Ao responder sim, o sistema compilará o aplicativo e configurará o atalho de autostart nativo para o seu sistema operacional (como `.config/autostart` no Ubuntu GNOME Wayland e BigLinux KDE, LaunchAgents no macOS, ou pasta Startup no Windows 11).
-
-Caso queira executar a bandeja manualmente para testes ou depuração:
+#### 2. Instalar a inicialização automática (Autostart)
+Configura a bandeja para rodar automaticamente ao iniciar o sistema operacional:
 ```bash
-# Executar a partir da raiz do repositório
-dotnet run --project AiMemory.Tray
+ai-memory tray install
 ```
+* **macOS:** Cria um LaunchAgent (`~/Library/LaunchAgents/com.aimemory.tray.plist`) com `ProgramArguments`, `WorkingDirectory`, `PATH` mínimo e logs em `~/Library/Logs/AiMemory`, registrando via `launchctl bootstrap`/`kickstart` quando disponível.
+* **Linux:** Cria um arquivo de inicialização automática (`~/.config/autostart/ai-memory-tray.desktop`).
+* **Windows:** Cria um atalho `.lnk` na pasta de inicialização rápida (`Startup`).
+
+> [!NOTE]
+> A bandeja resolve primeiro o shim da global tool (`~/.dotnet/tools/ai-memory` ou `%USERPROFILE%\.dotnet\tools\ai-memory.exe`), depois apphost publicado e, por fim, `dotnet ai-memory.dll`. Isso evita o erro comum de autostart apontando para `dotnet run` ou para um caminho interno temporário.
+
+#### 3. Verificar o status da bandeja
+Mostra se os atalhos de inicialização rápida estão instalados, onde estão os arquivos e se o processo do tray está rodando em segundo plano:
+```bash
+ai-memory tray status
+```
+
+#### 4. Atualizar a bandeja
+Recria os atalhos de autostart apontando para o executável atual. Útil se você atualizou a versão do `ai-memory` via NuGet e deseja remapear o link de inicialização:
+```bash
+ai-memory tray update
+```
+
+#### 5. Desinstalar a bandeja
+Remove os atalhos de inicialização automática do sistema operacional e encerra qualquer processo da bandeja rodando em background:
+```bash
+ai-memory tray uninstall
+ai-memory tray remove
+```
+
+#### 6. Assistente interativo da bandeja
+Abre um menu simples para instalar, atualizar o vínculo de autostart ou remover a bandeja:
+```bash
+ai-memory tray setup
+```
+
+O comando literal `ai-memory-tray setup` exigiria um segundo pacote/wrapper de .NET tool com outro `ToolCommandName`. O pacote atual publica um único comando, `ai-memory`; por isso o fluxo suportado neste pacote é `ai-memory tray setup`.
+
+---
 
 ---
 
@@ -338,6 +397,11 @@ ai-memory search "onde valida limite de crédito?"
 ai-memory watch
 ai-memory dashboard
 ai-memory dashboard serve
+ai-memory tray setup
+ai-memory tray install
+ai-memory tray status
+ai-memory tray update
+ai-memory tray remove
 ai-memory mcp
 ```
 
@@ -507,8 +571,10 @@ ai-memory index --semantic
 - chunking inicial com Roslyn para C#;
 - extração heurística e semântica opcional de regras e conhecimento;
 - comandos `index`, `search`, `watch` e `mcp`;
+- comandos de bandeja `tray setup`, `tray install`, `tray update`, `tray status`, `tray uninstall` e alias `tray remove`;
 - servidor MCP STDIO funcional;
-- ferramentas MCP `search_code`, `search_business_rules` e `find_related_files`.
+- ferramentas MCP `search_code`, `search_business_rules`, `search_knowledge`, `find_related_files`, `get_symbol_callers`, `get_symbol_callees` e `get_class_hierarchy`;
+- pacote NuGet configurado como .NET global tool com README, release notes, versão de assembly alinhada e assets de tray empacotados.
 
 ### Próximas melhorias
 
