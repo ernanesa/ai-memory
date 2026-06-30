@@ -224,12 +224,11 @@ namespace AiMemory.Commands
             bool installTray = false;
             if (hasGui)
             {
-                WriteInfo("Interface gráfica detectada. A bandeja do sistema será configurada para inicialização automática.");
-                installTray = true;
+                installTray = PromptYesNo("Install and enable the AI Memory tray autostart entry?", true);
             }
             else
             {
-                WriteWarning("Nenhuma interface gráfica detectada neste ambiente. A instalação da bandeja do sistema será ignorada.");
+                WriteWarning("No graphical session was detected. The system tray autostart setup will be skipped.");
             }
 
             return new SetupPlan(
@@ -266,7 +265,7 @@ namespace AiMemory.Commands
 
             if (plan.InstallTray)
             {
-                WriteBullet("instalar e habilitar o aplicativo de bandeja na inicialização do sistema (autostart)");
+                WriteBullet("install and enable the tray application at system startup");
             }
 
             if (plan.IsEmpty)
@@ -447,16 +446,56 @@ namespace AiMemory.Commands
 
                 await using var conn = new NpgsqlConnection(connectionString);
                 await conn.OpenAsync();
+                await EnsureSchemaMigrationsTableAsync(conn);
 
+                var applied = 0;
+                var skipped = 0;
                 foreach (var schemaFile in schemaFiles)
                 {
-                    var schema = await File.ReadAllTextAsync(schemaFile);
-                    await using var cmd = conn.CreateCommand();
-                    cmd.CommandText = schema;
-                    await cmd.ExecuteNonQueryAsync();
+                    var migrationName = Path.GetFileName(schemaFile);
+                    if (await IsSchemaMigrationAppliedAsync(conn, migrationName))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    await using var tx = await conn.BeginTransactionAsync();
+                    try
+                    {
+                        var schema = await File.ReadAllTextAsync(schemaFile);
+                        await using (var cmd = conn.CreateCommand())
+                        {
+                            cmd.Transaction = tx;
+                            cmd.CommandText = schema;
+                            await cmd.ExecuteNonQueryAsync();
+                        }
+
+                        await using (var markCmd = conn.CreateCommand())
+                        {
+                            markCmd.Transaction = tx;
+                            markCmd.CommandText = """
+                                INSERT INTO ai_schema_migrations(name, checksum)
+                                VALUES ($1, $2)
+                                ON CONFLICT(name) DO UPDATE
+                                SET checksum = EXCLUDED.checksum,
+                                    applied_at = NOW();
+                                """;
+                            markCmd.Parameters.AddWithValue(migrationName);
+                            markCmd.Parameters.AddWithValue(HashSchema(schema));
+                            await markCmd.ExecuteNonQueryAsync();
+                        }
+
+                        await tx.CommitAsync();
+                        applied++;
+                    }
+                    catch
+                    {
+                        await tx.RollbackAsync();
+                        throw;
+                    }
                 }
 
-                var schemaAppliedMessage = $"Database schema applied ({schemaFiles.Length} file(s))";
+                var schemaAppliedMessage = $"Database schema ready ({applied} applied, {skipped} already applied)";
                 WriteSuccess(schemaAppliedMessage);
                 return SetupStepResult.Success("Apply schema", schemaAppliedMessage);
             }
@@ -474,6 +513,33 @@ namespace AiMemory.Commands
                 WriteWarning(schemaErrorMessage);
                 return SetupStepResult.Warning("Apply schema", schemaErrorMessage);
             }
+        }
+
+        private static async Task EnsureSchemaMigrationsTableAsync(NpgsqlConnection conn)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS ai_schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    checksum TEXT NOT NULL,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        private static async Task<bool> IsSchemaMigrationAppliedAsync(NpgsqlConnection conn, string migrationName)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM ai_schema_migrations WHERE name = $1);";
+            cmd.Parameters.AddWithValue(migrationName);
+            return (bool)(await cmd.ExecuteScalarAsync() ?? false);
+        }
+
+        private static string HashSchema(string schema)
+        {
+            var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(schema));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
         }
 
         private static async Task<SetupStepResult> PullModelIfNeededAsync(string ollamaBaseUrl, string model)

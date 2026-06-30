@@ -218,7 +218,7 @@ namespace AiMemory.Services
                    row_number() OVER (ORDER BY c.embedding <=> $1) as rank
             FROM ai_chunks c
             ORDER BY c.embedding <=> $1
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         ),
         text_search AS (
             SELECT c.id,
@@ -226,7 +226,7 @@ namespace AiMemory.Services
             FROM ai_chunks c
             WHERE c.search_vector @@ websearch_to_tsquery('english', $3)
             ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', $3)) DESC
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         )
         SELECT p.name,
                c.file_path,
@@ -277,7 +277,7 @@ namespace AiMemory.Services
                   )
               )
             ORDER BY c.embedding <=> $1
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         ),
         text_search AS (
             SELECT c.id,
@@ -297,7 +297,7 @@ namespace AiMemory.Services
                   )
               )
             ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', $4)) DESC
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         )
         SELECT p.name,
                c.file_path,
@@ -360,7 +360,7 @@ namespace AiMemory.Services
                   )
               )
             ORDER BY r.embedding <=> $1
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         ),
         text_search AS (
             SELECT r.id,
@@ -381,7 +381,7 @@ namespace AiMemory.Services
                   )
               )
             ORDER BY ts_rank_cd(r.search_vector, websearch_to_tsquery('portuguese', $4)) DESC
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         )
         SELECT p.name,
                r.title,
@@ -448,7 +448,7 @@ namespace AiMemory.Services
                   )
               )
             ORDER BY k.embedding <=> $1
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         ),
         text_search AS (
             SELECT k.id,
@@ -469,7 +469,7 @@ namespace AiMemory.Services
                   )
               )
             ORDER BY ts_rank_cd(k.search_vector, websearch_to_tsquery('portuguese', $4)) DESC
-            LIMIT $2 * 2
+            LIMIT GREATEST($2 * 10, 100)
         )
         SELECT p.name,
                k.kind,

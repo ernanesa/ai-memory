@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Npgsql;
 
@@ -38,9 +39,17 @@ namespace AiMemory.Configuration
         public static async Task SaveAsync(AiMemoryConfig config, CancellationToken ct = default)
         {
             Directory.CreateDirectory(ConfigDirectory);
-            await using var stream = File.Create(ConfigPath);
-            await JsonSerializer.SerializeAsync(stream, ToPersistedConfig(Normalize(config)), JsonOptions, ct);
-            await stream.WriteAsync("\n"u8.ToArray(), ct);
+            RestrictDirectoryPermissions(ConfigDirectory);
+
+            var tempPath = $"{ConfigPath}.{Environment.ProcessId}.tmp";
+            await using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                await JsonSerializer.SerializeAsync(stream, ToPersistedConfig(Normalize(config)), JsonOptions, ct);
+                await stream.WriteAsync("\n"u8.ToArray(), ct);
+            }
+
+            File.Move(tempPath, ConfigPath, overwrite: true);
+            RestrictFilePermissions(ConfigPath);
         }
 
         public static bool Exists() => File.Exists(ConfigPath);
@@ -215,11 +224,102 @@ namespace AiMemory.Configuration
                 DatabaseHost = config.DatabaseHost,
                 DatabasePort = config.DatabasePort,
                 DatabaseUser = config.DatabaseUser,
-                DatabasePassword = config.DatabasePassword,
+                DatabasePassword = ShouldPersistDatabasePassword(config.DatabasePassword) ? config.DatabasePassword : null,
                 OllamaBaseUrl = config.OllamaBaseUrl,
                 EmbeddingModel = config.EmbeddingModel,
                 SemanticModel = config.SemanticModel
             };
+        }
+
+        public static bool HasPersistedDatabasePassword()
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(ConfigPath));
+                return document.RootElement.TryGetProperty("databasePassword", out var password) &&
+                       password.ValueKind == JsonValueKind.String &&
+                       !string.IsNullOrWhiteSpace(password.GetString());
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool HasRestrictiveConfigPermissions()
+        {
+            if (!File.Exists(ConfigPath) || OperatingSystem.IsWindows())
+            {
+                return true;
+            }
+
+            try
+            {
+                var mode = File.GetUnixFileMode(ConfigPath);
+                const UnixFileMode groupOrOther =
+                    UnixFileMode.GroupRead |
+                    UnixFileMode.GroupWrite |
+                    UnixFileMode.GroupExecute |
+                    UnixFileMode.OtherRead |
+                    UnixFileMode.OtherWrite |
+                    UnixFileMode.OtherExecute;
+                return (mode & groupOrOther) == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool ShouldPersistDatabasePassword(string? password)
+        {
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                return false;
+            }
+
+            var envPassword = Environment.GetEnvironmentVariable("AI_MEMORY_DB_PASSWORD");
+            return string.IsNullOrWhiteSpace(envPassword) ||
+                   !password.Equals(envPassword, StringComparison.Ordinal);
+        }
+
+        private static void RestrictDirectoryPermissions(string directory)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+            catch
+            {
+                // Best effort; doctor reports weak permissions.
+            }
+        }
+
+        private static void RestrictFilePermissions(string path)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            try
+            {
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            catch
+            {
+                // Best effort; doctor reports weak permissions.
+            }
         }
 
         public static string ExpandPath(string path)

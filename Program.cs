@@ -15,6 +15,7 @@ var workspaceOption = new Option<string?>("--workspace", "Workspace name overrid
 var projectFilterOption = new Option<string?>("--project", "Project filter");
 var portOption = new Option<int>("--port", () => 5050, "Dashboard HTTP port");
 var candidateLimitOption = new Option<int?>("--candidate-limit", "Max chunks considered by rules/knowledge extraction stages");
+var parallelismOption = new Option<int?>("--parallelism", "Max concurrent chunk embedding/upsert operations during chunk indexing");
 
 var index = new Command("index", "Index memory stages for configured projects");
 var indexStagesArg = new Argument<string[]>("stages", () => [], "Optional stages: chunks, rules, knowledge");
@@ -28,6 +29,7 @@ index.AddOption(refreshOption);
 index.AddOption(workspaceOption);
 index.AddOption(projectFilterOption);
 index.AddOption(candidateLimitOption);
+index.AddOption(parallelismOption);
 index.SetHandler(async (InvocationContext context) =>
 {
     var parseResult = context.ParseResult;
@@ -41,7 +43,8 @@ index.SetHandler(async (InvocationContext context) =>
         parseResult.GetValueForOption(semanticOption),
         parseResult.GetValueForOption(semanticModelOption),
         parseResult.GetValueForOption(refreshOption),
-        parseResult.GetValueForOption(candidateLimitOption));
+        parseResult.GetValueForOption(candidateLimitOption),
+        parseResult.GetValueForOption(parallelismOption));
 });
 
 var search = new Command("search", "Search engineering memory");
@@ -60,8 +63,21 @@ watch.AddOption(ollamaOption);
 watch.AddOption(modelOption);
 watch.SetHandler(async (db, ollama, model) => await WatchCommand.RunAsync(db, ollama, model), dbOption, ollamaOption, modelOption);
 
-var doctor = new Command("doctor", "Validate local environment and configuration");
-doctor.SetHandler(async () => await DoctorCommand.RunAsync());
+var doctor = new Command("doctor", "Validate local environment, schema, tray and configuration");
+var doctorJsonOption = new Option<bool>("--json", "Write machine-readable JSON diagnostics");
+var doctorStrictOption = new Option<bool>("--strict", "Treat warnings as failures");
+var doctorNoNetworkOption = new Option<bool>("--no-network", "Skip network checks such as Ollama reachability");
+doctor.AddOption(doctorJsonOption);
+doctor.AddOption(doctorStrictOption);
+doctor.AddOption(doctorNoNetworkOption);
+doctor.SetHandler(async (InvocationContext context) =>
+{
+    var parseResult = context.ParseResult;
+    context.ExitCode = await DoctorCommand.RunAsync(
+        parseResult.GetValueForOption(doctorJsonOption),
+        parseResult.GetValueForOption(doctorStrictOption),
+        parseResult.GetValueForOption(doctorNoNetworkOption));
+});
 
 var setup = new Command("setup", "Interactive first-time configuration wizard");
 setup.SetHandler(async () => await SetupCommand.RunAsync());
@@ -275,6 +291,7 @@ tray.SetHandler((InvocationContext context) =>
 {
     try
     {
+        AiMemory.Services.TraySetupService.RegisterCurrentTrayProcess();
         AppBuilder.Configure<AiMemory.Tray.App>()
             .UsePlatformDetect()
             .WithInterFont()

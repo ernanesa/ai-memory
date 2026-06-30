@@ -34,6 +34,26 @@ namespace AiMemory.Services
             }
         }
 
+        public static string GetTrayPidPath()
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var stateDir = Path.Combine(string.IsNullOrWhiteSpace(home) ? Path.GetTempPath() : home, ".ai-memory");
+            Directory.CreateDirectory(stateDir);
+            return Path.Combine(stateDir, "tray.pid");
+        }
+
+        public static void RegisterCurrentTrayProcess()
+        {
+            try
+            {
+                File.WriteAllText(GetTrayPidPath(), Environment.ProcessId.ToString());
+            }
+            catch
+            {
+                // Best effort only. Uninstall still uses command-line detection.
+            }
+        }
+
         public static async Task<TrayStatus> GetStatusAsync()
         {
             var autostartPath = GetAutostartPath();
@@ -43,23 +63,32 @@ namespace AiMemory.Services
             var running = false;
             try
             {
-                var currentPid = Environment.ProcessId;
-                var processes = Process.GetProcesses();
-                foreach (var p in processes)
+                var registeredProcess = TryGetRegisteredTrayProcess();
+                if (registeredProcess is not null && !registeredProcess.HasExited)
                 {
-                    try
-                    {
-                        if (p.Id == currentPid) continue;
+                    running = true;
+                }
 
-                        if (await IsTrayProcessAsync(p))
-                        {
-                            running = true;
-                            break;
-                        }
-                    }
-                    catch
+                if (!running)
+                {
+                    var currentPid = Environment.ProcessId;
+                    var processes = Process.GetProcesses();
+                    foreach (var p in processes)
                     {
-                        // Ignora processos sem permissão de leitura
+                        try
+                        {
+                            if (p.Id == currentPid) continue;
+
+                            if (await IsTrayProcessAsync(p))
+                            {
+                                running = true;
+                                break;
+                            }
+                        }
+                        catch
+                        {
+                            // Ignora processos sem permissão de leitura
+                        }
                     }
                 }
             }
@@ -311,6 +340,18 @@ Icon={iconPath}
                     File.Delete(autostartPath);
                 }
 
+                var registeredProcess = TryGetRegisteredTrayProcess();
+                if (registeredProcess is not null && !registeredProcess.HasExited)
+                {
+                    try
+                    {
+                        registeredProcess.Kill();
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 var currentPid = Environment.ProcessId;
                 var processes = Process.GetProcesses();
                 foreach (var p in processes)
@@ -330,6 +371,7 @@ Icon={iconPath}
                     }
                 }
 
+                TryDeletePidFile();
                 return true;
             }
             catch (Exception ex)
@@ -356,7 +398,41 @@ Icon={iconPath}
                        !commandLine.Contains(" mcp", StringComparison.OrdinalIgnoreCase);
             }
 
-            return processName.Equals(ToolCommandName, StringComparison.OrdinalIgnoreCase);
+            return false;
+        }
+
+        private static Process? TryGetRegisteredTrayProcess()
+        {
+            try
+            {
+                var pidPath = GetTrayPidPath();
+                if (!File.Exists(pidPath))
+                {
+                    return null;
+                }
+
+                var text = File.ReadAllText(pidPath).Trim();
+                return int.TryParse(text, out var pid) ? Process.GetProcessById(pid) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void TryDeletePidFile()
+        {
+            try
+            {
+                var pidPath = GetTrayPidPath();
+                if (File.Exists(pidPath))
+                {
+                    File.Delete(pidPath);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static async Task<string?> TryGetCommandLineAsync(Process process)

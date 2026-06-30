@@ -24,7 +24,8 @@ namespace AiMemory.Commands
             bool semantic,
             string? semanticModel,
             bool refresh,
-            int? candidateLimit)
+            int? candidateLimit,
+            int? parallelism)
         {
             var plan = ResolveStages(stages, ref project);
             if (plan is null)
@@ -35,6 +36,12 @@ namespace AiMemory.Commands
             if (candidateLimit <= 0)
             {
                 Console.WriteLine("--candidate-limit must be greater than zero.");
+                return;
+            }
+
+            if (parallelism <= 0)
+            {
+                Console.WriteLine("--parallelism must be greater than zero.");
                 return;
             }
 
@@ -78,7 +85,7 @@ namespace AiMemory.Commands
 
             if (plan.Value.Stages.Contains(IndexStage.Chunks))
             {
-                await IndexChunksAsync(projects, workspace.Name, config, db, ollama, model);
+                await IndexChunksAsync(projects, workspace.Name, config, db, ollama, model, parallelism);
             }
 
             if (plan.Value.Stages.Contains(IndexStage.Rules))
@@ -98,7 +105,8 @@ namespace AiMemory.Commands
             AiMemoryConfig config,
             string? db,
             string? ollama,
-            string? model)
+            string? model,
+            int? parallelism)
         {
             var chunker = new ChunkingService();
             var ollamaService = new OllamaService(
@@ -136,8 +144,9 @@ namespace AiMemory.Commands
                 var files = chunker.EnumerateFiles(root).ToList();
                 using var progress = new ChunkIndexProgressReporter("chunk files", files.Count);
                 var indexedChunks = 0;
+                var maxParallelism = parallelism ?? Math.Clamp(Environment.ProcessorCount / 2, 2, 6);
 
-                foreach (var file in files)
+                await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = maxParallelism }, async (file, ct) =>
                 {
                     var relativeFile = Path.GetRelativePath(root, file);
                     progress.BeforeItem(relativeFile);
@@ -147,10 +156,10 @@ namespace AiMemory.Commands
                         try
                         {
                             var contextualText = ContextualChunkingService.GetContextualContent(chunk);
-                            var embedding = await ollamaService.EmbedAsync(contextualText);
-                            await pg.UpsertChunkAsync(workspaceName, chunk, embedding);
-                            indexedChunks++;
-                            progress.AfterChunk(indexedChunks);
+                            var embedding = await ollamaService.EmbedAsync(contextualText, ct);
+                            await pg.UpsertChunkAsync(workspaceName, chunk, embedding, ct);
+                            var current = Interlocked.Increment(ref indexedChunks);
+                            progress.AfterChunk(current);
                         }
                         catch (Exception ex)
                         {
@@ -163,7 +172,7 @@ namespace AiMemory.Commands
                     }
 
                     progress.AfterItem(indexedChunks);
-                }
+                });
 
                 progress.Complete(indexedChunks);
 

@@ -22,13 +22,21 @@ namespace AiMemory.Commands
             var ollamaBaseUrl = ConfigService.ResolveOllamaBaseUrl(config, ollama);
             var embeddingModel = ConfigService.ResolveEmbeddingModel(config, model);
 
-            var server = new McpServer(connectionString, ollamaBaseUrl, embeddingModel);
+            await using var server = new McpServer(connectionString, ollamaBaseUrl, embeddingModel);
             await server.RunAsync();
         }
 
-        private sealed class McpServer(string connectionString, string ollamaBaseUrl, string embeddingModel)
+        private sealed class McpServer(string connectionString, string ollamaBaseUrl, string embeddingModel) : IAsyncDisposable
         {
             private readonly OllamaService _ollama = new(ollamaBaseUrl, embeddingModel);
+            private readonly PgVectorService _pg = new(connectionString);
+            private readonly Dictionary<string, float[]> _embeddingCache = new(StringComparer.Ordinal);
+            private readonly object _embeddingCacheLock = new();
+
+            public async ValueTask DisposeAsync()
+            {
+                await _pg.DisposeAsync();
+            }
 
             public async Task RunAsync(CancellationToken ct = default)
             {
@@ -191,9 +199,8 @@ namespace AiMemory.Commands
                 var project = GetOptionalString(arguments, "project");
                 var maxContentChars = GetOptionalInt(arguments, "max_content_chars", 1200, 200, 10000);
 
-                var embedding = await _ollama.EmbedAsync(query, ct);
-                await using var pg = new PgVectorService(connectionString);
-                var results = await pg.SearchCodeAsync(embedding, query, limit, project, ct);
+                var embedding = await EmbedCachedAsync(query, ct);
+                var results = await _pg.SearchCodeAsync(embedding, query, limit, project, ct);
                 var reranked = RerankerService.RerankCode(results, query);
 
                 var payload = reranked.Select(r => new
@@ -216,9 +223,8 @@ namespace AiMemory.Commands
                 var limit = GetOptionalInt(arguments, "limit", 10, 1, 50);
                 var project = GetOptionalString(arguments, "project");
 
-                var embedding = await _ollama.EmbedAsync(query, ct);
-                await using var pg = new PgVectorService(connectionString);
-                var results = await pg.SearchBusinessRulesAsync(embedding, query, limit, project, ct);
+                var embedding = await EmbedCachedAsync(query, ct);
+                var results = await _pg.SearchBusinessRulesAsync(embedding, query, limit, project, ct);
                 var payload = results.Select(r => new
                 {
                     r.Project,
@@ -240,9 +246,8 @@ namespace AiMemory.Commands
                 var limit = GetOptionalInt(arguments, "limit", 10, 1, 50);
                 var project = GetOptionalString(arguments, "project");
 
-                var embedding = await _ollama.EmbedAsync(query, ct);
-                await using var pg = new PgVectorService(connectionString);
-                var results = await pg.SearchKnowledgeAsync(embedding, query, limit, project, ct);
+                var embedding = await EmbedCachedAsync(query, ct);
+                var results = await _pg.SearchKnowledgeAsync(embedding, query, limit, project, ct);
                 var payload = results.Select(r => new
                 {
                     r.Project,
@@ -264,8 +269,7 @@ namespace AiMemory.Commands
                 var symbol = GetRequiredString(arguments, "symbol");
                 var project = GetOptionalString(arguments, "project");
 
-                await using var pg = new PgVectorService(connectionString);
-                var results = await pg.GetSymbolCallersAsync(symbol, project, ct);
+                var results = await _pg.GetSymbolCallersAsync(symbol, project, ct);
                 return ToolJsonResult(results.Select(r => new { Project = r.Project, Symbol = r.Symbol, File = r.File, Relation = r.Relation }));
             }
 
@@ -274,8 +278,7 @@ namespace AiMemory.Commands
                 var symbol = GetRequiredString(arguments, "symbol");
                 var project = GetOptionalString(arguments, "project");
 
-                await using var pg = new PgVectorService(connectionString);
-                var results = await pg.GetSymbolCalleesAsync(symbol, project, ct);
+                var results = await _pg.GetSymbolCalleesAsync(symbol, project, ct);
                 return ToolJsonResult(results.Select(r => new { Project = r.Project, Symbol = r.Symbol, File = r.File, Relation = r.Relation }));
             }
 
@@ -284,8 +287,7 @@ namespace AiMemory.Commands
                 var className = GetRequiredString(arguments, "className");
                 var project = GetOptionalString(arguments, "project");
 
-                await using var pg = new PgVectorService(connectionString);
-                var results = await pg.GetClassHierarchyAsync(className, project, ct);
+                var results = await _pg.GetClassHierarchyAsync(className, project, ct);
                 return ToolJsonResult(results.Select(r => new { Project = r.Project, ParentName = r.ParentName, Relation = r.Relation }));
             }
 
@@ -301,7 +303,6 @@ namespace AiMemory.Commands
                     throw new ArgumentException("Provide either 'file' or 'query'.");
                 }
 
-                await using var pg = new PgVectorService(connectionString);
                 string embeddingText;
                 if (!string.IsNullOrWhiteSpace(query))
                 {
@@ -309,7 +310,7 @@ namespace AiMemory.Commands
                 }
                 else
                 {
-                    var chunks = await pg.GetFileChunksAsync(file!, project, 12000, ct);
+                    var chunks = await _pg.GetFileChunksAsync(file!, project, 12000, ct);
                     if (chunks.Count == 0)
                     {
                         throw new ArgumentException($"No indexed chunks found for file: {file}");
@@ -318,9 +319,34 @@ namespace AiMemory.Commands
                     embeddingText = string.Join("\n\n", chunks.Select(c => c.Content));
                 }
 
-                var embedding = await _ollama.EmbedAsync(embeddingText, ct);
-                var results = await pg.FindRelatedFilesAsync(embedding, limit, project, file, ct);
+                var embedding = await EmbedCachedAsync(embeddingText, ct);
+                var results = await _pg.FindRelatedFilesAsync(embedding, limit, project, file, ct);
                 return ToolJsonResult(results);
+            }
+
+            private async Task<float[]> EmbedCachedAsync(string text, CancellationToken ct)
+            {
+                var key = $"{embeddingModel}\n{text}";
+                lock (_embeddingCacheLock)
+                {
+                    if (_embeddingCache.TryGetValue(key, out var cached))
+                    {
+                        return cached;
+                    }
+                }
+
+                var embedding = await _ollama.EmbedAsync(text, ct);
+                lock (_embeddingCacheLock)
+                {
+                    if (_embeddingCache.Count >= 128)
+                    {
+                        _embeddingCache.Remove(_embeddingCache.Keys.First());
+                    }
+
+                    _embeddingCache[key] = embedding;
+                }
+
+                return embedding;
             }
 
             private static object[] CreateTools()
