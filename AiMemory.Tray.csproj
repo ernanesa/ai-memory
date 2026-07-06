@@ -8,7 +8,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>ai-memory-tray</ToolCommandName>
     <PackageId>AiMemory.Tray</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.2.3</Version>
     <Authors>Engineering Team</Authors>
     <Company>Engineering Team</Company>
     <Product>AI Memory Tray</Product>
@@ -21,7 +21,6 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.0.10" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.10" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.0.10" />
-    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
     <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
   <ItemGroup>

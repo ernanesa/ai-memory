@@ -36,10 +36,10 @@ namespace AiMemory.Tray
                 // Carregar bitmaps dos assets de ícones
                 try
                 {
-                    using var activeStream = AssetLoader.Open(new Uri("avares://ai-memory/Tray/Assets/active.png"));
+                    using var activeStream = AssetLoader.Open(new Uri("avares://AiMemory.Tray/Tray/Assets/active.png"));
                     _activeIcon = new WindowIcon(activeStream);
 
-                    using var idleStream = AssetLoader.Open(new Uri("avares://ai-memory/Tray/Assets/idle.png"));
+                    using var idleStream = AssetLoader.Open(new Uri("avares://AiMemory.Tray/Tray/Assets/idle.png"));
                     _idleIcon = new WindowIcon(idleStream);
                 }
                 catch (Exception ex)
