@@ -90,12 +90,12 @@ namespace AiMemory.Commands
 
             if (plan.Value.Stages.Contains(IndexStage.Rules))
             {
-                await IndexRulesAsync(projects, workspace.Name, config, db, ollama, model, semantic, semanticModel, refresh, candidateLimit);
+                await IndexRulesAsync(projects, workspace.Name, config, db, ollama, model, semantic, semanticModel, refresh, candidateLimit, parallelism);
             }
 
             if (plan.Value.Stages.Contains(IndexStage.Knowledge))
             {
-                await IndexKnowledgeAsync(projects, workspace.Name, config, db, ollama, model, semantic, semanticModel, refresh, candidateLimit);
+                await IndexKnowledgeAsync(projects, workspace.Name, config, db, ollama, model, semantic, semanticModel, refresh, candidateLimit, parallelism);
             }
         }
 
@@ -176,6 +176,13 @@ namespace AiMemory.Commands
 
                 progress.Complete(indexedChunks);
 
+                var relativeFiles = files.Select(f => Path.GetRelativePath(root, f)).ToArray();
+                var removedOrphans = await pg.DeleteOrphanChunksAsync(workspaceName, [configuredProject.Name], relativeFiles);
+                if (removedOrphans > 0)
+                {
+                    Console.WriteLine($"Removed orphan chunks: {removedOrphans:N0}");
+                }
+
                 try
                 {
                     var projectId = await pg.GetProjectIdByNameAsync(configuredProject.Name);
@@ -205,7 +212,8 @@ namespace AiMemory.Commands
             bool semantic,
             string? semanticModel,
             bool refresh,
-            int? candidateLimit)
+            int? candidateLimit,
+            int? parallelism)
         {
             Console.WriteLine($"Indexing rules for workspace '{workspaceName}' ({projects.Count} project(s)).");
             if (semantic)
@@ -236,7 +244,8 @@ namespace AiMemory.Commands
             PrintCandidateScope(stats, chunks.Count, candidateLimit, refresh);
 
             using var progress = new ProgressReporter("rule chunks", chunks.Count);
-            foreach (var chunk in chunks)
+            var maxParallelism = parallelism ?? 4;
+            await Parallel.ForEachAsync(chunks, new ParallelOptions { MaxDegreeOfParallelism = maxParallelism }, async (chunk, ct) =>
             {
                 progress.BeforeItem($"{chunk.File}{(chunk.Symbol is null ? "" : $"::{chunk.Symbol}")}");
                 var chunkFailed = false;
@@ -251,7 +260,7 @@ namespace AiMemory.Commands
                     }
 
                     candidates = RuleExtractionService.DeduplicateBusinessRules(candidates).ToList();
-                    extracted += candidates.Count;
+                    Interlocked.Add(ref extracted, candidates.Count);
                 }
                 catch (Exception ex)
                 {
@@ -264,14 +273,14 @@ namespace AiMemory.Commands
                 {
                     await pg.MarkExtractionChunkFailedAsync(chunk.Id, "rules", chunk.ContentHash, chunkError);
                     progress.AfterItem(inserted, updated, skipped);
-                    continue;
+                    return;
                 }
 
                 if (candidates.Count == 0)
                 {
                     await pg.MarkExtractionChunkProcessedAsync(chunk.Id, "rules", chunk.ContentHash);
                     progress.AfterItem(inserted, updated, skipped);
-                    continue;
+                    return;
                 }
 
                 try
@@ -279,18 +288,18 @@ namespace AiMemory.Commands
                     foreach (var candidate in candidates)
                     {
                         progress.UpdateCurrent($"{candidate.SourceFile}{(candidate.SymbolName is null ? "" : $"::{candidate.SymbolName}")}");
-                        var embedding = await ollamaService.EmbedAsync($"{candidate.Title}\n{candidate.Description}\n{candidate.Evidence}");
+                        var embedding = await ollamaService.EmbedAsync($"{candidate.Title}\n{candidate.Description}\n{candidate.Evidence}", ct);
                         var result = await pg.UpsertBusinessRuleCandidateAsync(candidate, embedding);
-                        if (result.Action == "inserted") inserted++;
-                        else if (result.Action == "updated") updated++;
-                        else skipped++;
+                        if (result.Action == "inserted") Interlocked.Increment(ref inserted);
+                        else if (result.Action == "updated") Interlocked.Increment(ref updated);
+                        else Interlocked.Increment(ref skipped);
                     }
                 }
                 catch (Exception ex)
                 {
                     chunkFailed = true;
                     chunkError = ex.Message;
-                    skipped += candidates.Count;
+                    Interlocked.Add(ref skipped, candidates.Count);
                     progress.WriteMessage($"  failed rule chunk {chunk.File}: {ex.Message}");
                 }
 
@@ -304,7 +313,7 @@ namespace AiMemory.Commands
                 }
 
                 progress.AfterItem(inserted, updated, skipped);
-            }
+            });
             progress.Complete(inserted, updated, skipped);
 
             Console.WriteLine($"  extracted rule candidates: {extracted:N0}");
@@ -324,7 +333,8 @@ namespace AiMemory.Commands
             bool semantic,
             string? semanticModel,
             bool refresh,
-            int? candidateLimit)
+            int? candidateLimit,
+            int? parallelism)
         {
             Console.WriteLine($"Indexing knowledge for workspace '{workspaceName}' ({projects.Count} project(s)).");
             if (semantic)
@@ -355,7 +365,8 @@ namespace AiMemory.Commands
             PrintCandidateScope(stats, chunks.Count, candidateLimit, refresh);
 
             using var progress = new ProgressReporter("knowledge chunks", chunks.Count);
-            foreach (var chunk in chunks)
+            var maxParallelism = parallelism ?? 4;
+            await Parallel.ForEachAsync(chunks, new ParallelOptions { MaxDegreeOfParallelism = maxParallelism }, async (chunk, ct) =>
             {
                 progress.BeforeItem($"{chunk.File}{(chunk.Symbol is null ? "" : $"::{chunk.Symbol}")}");
                 var chunkFailed = false;
@@ -370,7 +381,7 @@ namespace AiMemory.Commands
                     }
 
                     candidates = KnowledgeExtractionService.DeduplicateKnowledge(candidates).ToList();
-                    extracted += candidates.Count;
+                    Interlocked.Add(ref extracted, candidates.Count);
                 }
                 catch (Exception ex)
                 {
@@ -383,14 +394,14 @@ namespace AiMemory.Commands
                 {
                     await pg.MarkExtractionChunkFailedAsync(chunk.Id, "knowledge", chunk.ContentHash, chunkError);
                     progress.AfterItem(inserted, updated, skipped);
-                    continue;
+                    return;
                 }
 
                 if (candidates.Count == 0)
                 {
                     await pg.MarkExtractionChunkProcessedAsync(chunk.Id, "knowledge", chunk.ContentHash);
                     progress.AfterItem(inserted, updated, skipped);
-                    continue;
+                    return;
                 }
 
                 try
@@ -398,18 +409,18 @@ namespace AiMemory.Commands
                     foreach (var candidate in candidates)
                     {
                         progress.UpdateCurrent($"{candidate.Source}{(candidate.SymbolName is null ? "" : $"::{candidate.SymbolName}")}");
-                        var embedding = await ollamaService.EmbedAsync($"{candidate.Kind}\n{candidate.Title}\n{candidate.Content}\n{candidate.Evidence}");
+                        var embedding = await ollamaService.EmbedAsync($"{candidate.Kind}\n{candidate.Title}\n{candidate.Content}\n{candidate.Evidence}", ct);
                         var result = await pg.UpsertKnowledgeCandidateAsync(candidate, embedding);
-                        if (result.Action == "inserted") inserted++;
-                        else if (result.Action == "updated") updated++;
-                        else skipped++;
+                        if (result.Action == "inserted") Interlocked.Increment(ref inserted);
+                        else if (result.Action == "updated") Interlocked.Increment(ref updated);
+                        else Interlocked.Increment(ref skipped);
                     }
                 }
                 catch (Exception ex)
                 {
                     chunkFailed = true;
                     chunkError = ex.Message;
-                    skipped += candidates.Count;
+                    Interlocked.Add(ref skipped, candidates.Count);
                     progress.WriteMessage($"  failed knowledge chunk {chunk.File}: {ex.Message}");
                 }
 
@@ -423,7 +434,7 @@ namespace AiMemory.Commands
                 }
 
                 progress.AfterItem(inserted, updated, skipped);
-            }
+            });
             progress.Complete(inserted, updated, skipped);
 
             Console.WriteLine($"  extracted knowledge candidates: {extracted:N0}");

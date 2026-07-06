@@ -7,6 +7,7 @@ namespace AiMemory.Services
     public static class TraySetupService
     {
         private const string ToolCommandName = "ai-memory";
+        private const string TrayCommandName = "ai-memory-tray";
         private const string TrayLaunchAgentLabel = "com.aimemory.tray";
 
         public record TrayStatus(bool Installed, bool Running, string? AutostartPath, string? ExecutablePath);
@@ -58,7 +59,7 @@ namespace AiMemory.Services
         {
             var autostartPath = GetAutostartPath();
             var installed = File.Exists(autostartPath);
-            var trayCommand = ResolveToolCommand(["tray"]);
+            var trayCommand = ResolveStandaloneTrayCommand();
 
             var running = false;
             try
@@ -102,7 +103,9 @@ namespace AiMemory.Services
 
         public static ProcessStartInfo CreateAiMemoryProcessStartInfo(params string[] arguments)
         {
-            var command = ResolveToolCommand(arguments);
+            var command = arguments.Length > 0 && arguments[0] == "tray"
+                ? ResolveStandaloneTrayCommand()
+                : ResolveToolCommand(arguments);
             var startInfo = new ProcessStartInfo
             {
                 FileName = command.FileName,
@@ -118,6 +121,28 @@ namespace AiMemory.Services
 
             AddStableEnvironment(startInfo);
             return startInfo;
+        }
+
+        private static TrayCommand ResolveStandaloneTrayCommand()
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var trayExecutableName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                ? $"{TrayCommandName}.exe"
+                : TrayCommandName;
+
+            var globalToolPath = Path.Combine(home, ".dotnet", "tools", trayExecutableName);
+            if (File.Exists(globalToolPath))
+            {
+                return new TrayCommand(globalToolPath, [], Path.GetDirectoryName(globalToolPath) ?? home);
+            }
+
+            var appHostPath = Path.Combine(AppContext.BaseDirectory, trayExecutableName);
+            if (File.Exists(appHostPath))
+            {
+                return new TrayCommand(appHostPath, [], AppContext.BaseDirectory);
+            }
+
+            return ResolveToolCommand(["tray"]);
         }
 
         private static TrayCommand ResolveToolCommand(params string[] extraArguments)
@@ -187,7 +212,7 @@ namespace AiMemory.Services
 
         public static async Task<bool> InstallAsync()
         {
-            var trayCommand = ResolveToolCommand(["tray"]);
+            var trayCommand = ResolveStandaloneTrayCommand();
 
             var autostartPath = GetAutostartPath();
             var autostartDir = Path.GetDirectoryName(autostartPath);

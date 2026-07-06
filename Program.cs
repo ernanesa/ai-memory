@@ -1,7 +1,6 @@
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using AiMemory.Commands;
-using Avalonia;
 
 var root = new RootCommand("AI Memory Tool - local engineering memory with Ollama + PostgreSQL/pgvector. Install/update/remove the NuGet tool with dotnet tool; manage tray autostart with ai-memory tray setup/install/update/remove.");
 
@@ -291,17 +290,18 @@ tray.SetHandler((InvocationContext context) =>
 {
     try
     {
-        AiMemory.Services.TraySetupService.RegisterCurrentTrayProcess();
-        AppBuilder.Configure<AiMemory.Tray.App>()
-            .UsePlatformDetect()
-            .WithInterFont()
-            .LogToTrace()
-            .StartWithClassicDesktopLifetime(
-                context.ParseResult.Tokens.Select(t => t.Value).ToArray());
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "ai-memory-tray",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        System.Diagnostics.Process.Start(psi);
+        Console.WriteLine("Tray application started.");
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"Error starting tray: {ex.Message}");
+        Console.Error.WriteLine($"Error starting tray: {ex.Message}. Install with: dotnet tool install -g AiMemory.Tray");
         context.ExitCode = 1;
     }
 });

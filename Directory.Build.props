@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectFile)' == 'AiMemory.Tray.csproj'">
+    <BaseIntermediateOutputPath>obj/tray/</BaseIntermediateOutputPath>
+    <BaseOutputPath>bin/tray/</BaseOutputPath>
+  </PropertyGroup>
+</Project>

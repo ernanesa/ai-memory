@@ -123,6 +123,8 @@ Se o gerenciador de pacotes da plataforma não estiver disponível, se o `pgvect
 
 ## 3. Tray Application (Bandeja do Sistema)
 
+> O tray agora é um package NuGet separado (`AiMemory.Tray`). Instale com `ai-memory tray install` ou via `dotnet tool install -g AiMemory.Tray`. O package principal `AiMemory.Tool` não carrega mais assemblies de UI.
+
 Criamos uma aplicação visual complementar para a barra de tarefas/bandeja do sistema chamada **`AiMemory.Tray`**, escrita com **Avalonia UI** no .NET 10. Ela permite monitorar visualmente se o servidor MCP está sendo ativamente consumido pelas IDEs (Rider/VS Code/Cursor/Codex).
 
 ### Funcionalidades:
@@ -389,6 +391,7 @@ ai-memory project add
 ai-memory project add --workspace pagueOn
 ai-memory project list --workspace claps
 ai-memory index
+ai-memory index --parallelism 4
 ai-memory index --semantic
 ai-memory index --workspace claps
 ai-memory index chunks --project gestor --workspace claps
@@ -397,12 +400,12 @@ ai-memory search "onde valida limite de crédito?"
 ai-memory watch
 ai-memory dashboard
 ai-memory dashboard serve
-ai-memory tray setup
-ai-memory tray install
+ai-memory tray               # launch tray (requires AiMemory.Tray package)
+ai-memory tray install        # install AiMemory.Tray + autostart
 ai-memory tray status
-ai-memory tray update
-ai-memory tray remove
-ai-memory mcp
+ai-memory tray update         # re-link autostart after dotnet tool update
+ai-memory tray remove         # uninstall from startup
+ai-memory mcp   # MCP server (protocol 2025-11-25)
 ```
 
 O dashboard possui dois modos:
@@ -497,6 +500,7 @@ export AI_MEMORY_DB_PASSWORD="senha"
 export AI_MEMORY_OLLAMA="http://localhost:11434"
 export AI_MEMORY_EMBED_MODEL="bge-m3"
 export AI_MEMORY_SEMANTIC_MODEL="qwen2.5-coder:7b"
+export AI_MEMORY_PARALLELISM="4"
 ```
 
 Se `AI_MEMORY_DB` contiver uma connection string completa, ela tem prioridade e o setup não pergunta `host`, `porta`, `usuário` e `senha` separadamente.
@@ -574,7 +578,15 @@ ai-memory index --semantic
 - comandos de bandeja `tray setup`, `tray install`, `tray update`, `tray status`, `tray uninstall` e alias `tray remove`;
 - servidor MCP STDIO funcional;
 - ferramentas MCP `search_code`, `search_business_rules`, `search_knowledge`, `find_related_files`, `get_symbol_callers`, `get_symbol_callees` e `get_class_hierarchy`;
-- pacote NuGet configurado como .NET global tool com README, release notes, versão de assembly alinhada e assets de tray empacotados.
+- pacote NuGet configurado como .NET global tool com README, release notes, versão de assembly alinhada e assets de tray empacotados;
+- MCP protocol `2025-11-25` com Tool Annotations, Structured Output, ícones, Tool Execution Errors;
+- extração semântica paralela com `--parallelism`;
+- retry automático com Polly em chamadas Ollama;
+- cache de embedding LRU com TTL;
+- heurísticas de extração configuráveis via arquivo JSON;
+- pipeline CI/CD (GitHub Actions);
+- 35 testes unitários cobrindo serviços core;
+- package tray separado (`AiMemory.Tray`) para instalação leve da CLI.
 
 ### Próximas melhorias
 

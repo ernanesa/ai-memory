@@ -8,13 +8,19 @@ namespace AiMemory.Services
 {
     public sealed class ChunkingService
     {
-        private const int MaxChunkLength = 1_000;
+        private const int MaxChunkLength = 6_000;
 
         private static readonly HashSet<string> IgnoredDirs = new(StringComparer.OrdinalIgnoreCase)
         { ".git", "bin", "obj", "node_modules", "dist", "coverage", "packages", ".idea", ".vs", ".vscode" };
 
         private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".cs", ".csproj", ".sln", ".sql", ".json", ".md", ".yml", ".yaml", ".config", ".props", ".targets", ".razor", ".cshtml" };
+
+        public bool ShouldWatchExtension(string? ext)
+        {
+            if (string.IsNullOrEmpty(ext)) return false;
+            return AllowedExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase);
+        }
 
         public IEnumerable<string> EnumerateFiles(string root)
         {
@@ -87,7 +93,7 @@ namespace AiMemory.Services
                     var symbol = GetTypeSymbolName(type);
                     var content = GetNodeText(text, type);
 
-                    if (content.Length <= 8_000)
+                    if (content.Length <= 6_000)
                     {
                         chunks.Add(("type", symbol, content));
                         continue;
@@ -132,7 +138,7 @@ namespace AiMemory.Services
                 var content = text[start..end];
                 var symbol = matches[i].Groups[3].Value;
                 var kind = matches[i].Value.Contains(" class ") || matches[i].Value.Contains(" record ") ? "type" : "member";
-                if (content.Length > 8_000)
+                if (content.Length > 6_000)
                 {
                     foreach (var c in ChunkBySize(content, kind, symbol)) yield return c;
                 }

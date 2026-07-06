@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ai-memory-tray</ToolCommandName>
+    <PackageId>AiMemory.Tray</PackageId>
+    <Version>0.2.0</Version>
+    <Authors>Engineering Team</Authors>
+    <Company>Engineering Team</Company>
+    <Product>AI Memory Tray</Product>
+    <Description>System tray monitor for ai-memory. Companion to AiMemory.Tool.</Description>
+    <PackageTags>ai;memory;tray;avalonia;dotnet-tool</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.0.10" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.0.10" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.10" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.0.10" />
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+    <PackageReference Include="Npgsql" Version="9.0.3" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Tray/Assets/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Tray/App.axaml.cs" />
+    <Compile Include="Tray/Program.cs" />
+    <Compile Include="Configuration/AiMemoryConfig.cs" />
+    <Compile Include="Configuration/ConfigService.cs" />
+    <Compile Include="Configuration/PatternsConfig.cs" />
+    <AvaloniaXaml Include="Tray/App.axaml" />
+  </ItemGroup>
+</Project>
