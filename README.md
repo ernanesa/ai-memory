@@ -90,13 +90,13 @@ dotnet tool install --global --add-source ./bin/Release AiMemory.Tool
 ### Instalar uma versão específica de um feed NuGet
 
 ```bash
-dotnet tool install --global AiMemory.Tool --version 0.2.0 --add-source <feed-nuget-da-empresa>
+dotnet tool install --global AiMemory.Tool --version 0.2.4 --add-source <feed-nuget-da-empresa>
 ```
 
 ### Atualizar a versão instalada
 
 ```bash
-dotnet tool update --global AiMemory.Tool --version 0.2.0 --add-source <feed-nuget-da-empresa>
+dotnet tool update --global AiMemory.Tool --version 0.2.4 --add-source <feed-nuget-da-empresa>
 ai-memory tray update   # recria o autostart apontando para o shim atual
 ```
 
@@ -602,7 +602,8 @@ Resumo de marcos (detalhes em `planning/`):
 
 | Versão | Foco | Status |
 |---|---|---|
-| **v0.2.0** | Estabilização: build, FK cascade, migrations determinísticas, MaxChunkLength unificado, MCP stdout guardado, testes, split de `PgVectorService`, batch embedding, paralelismo, Polly, watcher real, cache LRU, heurísticas configuráveis, CI/CD | **current** |
+| **v0.2.0** | Estabilização: build, FK cascade, migrations determinísticas, MaxChunkLength unificado, MCP stdout guardado, testes, split de `PgVectorService`, batch embedding, paralelismo, Polly, watcher real, cache LRU, heurísticas configuráveis, CI/CD | released |
+| **v0.2.4** | Hotfix: correção do timeout do MCP (respostas JSON-RPC escritas em stdout capturado antes do redirect), `setup-mcp.sh`, configs `.opencode` e `.ai/mcp`, tray asset paths, alinhamento de versão entre `AiMemory.Tool` e `AiMemory.Tray` | **current** |
 | **v0.3.0** | Performance: batch `/api/embed` com fallback, paralelismo de `rules`/`knowledge`, retry Polly v8 | planejada |
 | **v0.4.0** | MCP `2025-11-25` (Tool Annotations, Structured Output, ícones, Tool Execution Errors, `title`) + **split do tray** em pacote próprio | em curso (tray já separado como `AiMemory.Tray`) |
 | **v0.5.0** | Maturidade: CI/CD, watcher real, `patterns.json`, cache LRU+TTL | partes já entregues |
