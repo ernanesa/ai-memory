@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcpServers": {
+    "ai-memory": {
+      "type": "stdio",
+      "command": "ai-memory",
+      "args": ["mcp"]
+    }
+  }
+}
