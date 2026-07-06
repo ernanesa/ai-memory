@@ -36,6 +36,7 @@ namespace AiMemory.Commands
                 SizeLimit = 1000,
                 ExpirationScanFrequency = TimeSpan.FromMinutes(5)
             });
+            private TextWriter _stdout = Console.Out;
 
             public async ValueTask DisposeAsync()
             {
@@ -46,6 +47,7 @@ namespace AiMemory.Commands
             {
                 Console.Error.WriteLine("AI Memory MCP server started over stdio.");
 
+                _stdout = Console.Out;
                 var originalOut = Console.Out;
                 Console.SetOut(TextWriter.Null);
                 try
@@ -528,12 +530,12 @@ namespace AiMemory.Commands
                 };
             }
 
-            private static async Task WriteResultAsync(JsonElement? id, object result, CancellationToken ct)
+            private async Task WriteResultAsync(JsonElement? id, object result, CancellationToken ct)
             {
                 await WriteMessageAsync(new { jsonrpc = "2.0", id, result }, ct);
             }
 
-            private static async Task WriteToolErrorAsync(JsonElement? id, string message, CancellationToken ct)
+            private async Task WriteToolErrorAsync(JsonElement? id, string message, CancellationToken ct)
             {
                 await WriteResultAsync(id, new
                 {
@@ -549,7 +551,7 @@ namespace AiMemory.Commands
                 }, ct);
             }
 
-            private static async Task WriteErrorAsync(JsonElement? id, int code, string message, CancellationToken ct)
+            private async Task WriteErrorAsync(JsonElement? id, int code, string message, CancellationToken ct)
             {
                 await WriteMessageAsync(new
                 {
@@ -563,11 +565,11 @@ namespace AiMemory.Commands
                 }, ct);
             }
 
-            private static async Task WriteMessageAsync(object message, CancellationToken ct)
+            private async Task WriteMessageAsync(object message, CancellationToken ct)
             {
                 var json = JsonSerializer.Serialize(message, JsonOptions);
-                await Console.Out.WriteLineAsync(json.AsMemory(), ct);
-                await Console.Out.FlushAsync(ct);
+                await _stdout.WriteLineAsync(json.AsMemory(), ct);
+                await _stdout.FlushAsync(ct);
             }
 
             private static string GetRequiredString(JsonElement arguments, string name)

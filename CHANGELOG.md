@@ -24,6 +24,7 @@ Formato: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versionamento
 
 ### Fixed
 - Build failure on Linux/macOS due to `Directory.SetUnixFileMode` targeting pack mismatch (now uses reflection + `chmod` fallback)
+- MCP server not responding to `initialize`/`tools/list` (client timeout after 30s). `Console.SetOut(TextWriter.Null)` (added to silence logs and protect the JSON-RPC stream) was also swallowing the JSON-RPC responses themselves, which were written to `Console.Out`. Responses are now written to a captured stdout reference taken before redirection.
 
 ### Removed
 - Avalonia UI dependencies from main `AiMemory.Tool` package (now in separate `AiMemory.Tray`)
