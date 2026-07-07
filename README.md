@@ -304,7 +304,6 @@ O comando `skills` instala o conteúdo de `ai-config-files/` em diretórios loca
 - diretórios de projeto do Roo Code/opencode quando existirem dentro dos projetos configurados.
 
 > A instalação copia arquivos; ela não promete auto-discovery nativo em clientes que não tenham um padrão público/estável de skills. Quando o cliente não auto-descobrir, use o diretório instalado como fonte de prompt, skill, regra de projeto ou instrução compartilhada.
-
 ### Doctor (validação do ambiente)
 
 ```bash
@@ -355,6 +354,7 @@ A resposta do `initialize` inclui **instructions** recomendando a ordem de uso: 
 ## Configuração de MCP nas IDEs
 
 ### Rider
+
 
 **Settings → Tools → AI Assistant → Model Context Protocol (MCP)**:
 
