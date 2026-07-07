@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Npgsql;
@@ -23,6 +25,26 @@ namespace AiMemory.Configuration
         }
 
         public static string ConfigPath => Path.Combine(ConfigDirectory, "config.json");
+
+        public static async Task<PatternsConfig> LoadPatternsAsync()
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".aimemory", "patterns.json");
+            if (!File.Exists(path))
+            {
+                return PatternsConfig.Default;
+            }
+
+            try
+            {
+                var json = await File.ReadAllTextAsync(path);
+                var loaded = JsonSerializer.Deserialize<PatternsConfig>(json, JsonOptions);
+                return loaded ?? PatternsConfig.Default;
+            }
+            catch
+            {
+                return PatternsConfig.Default;
+            }
+        }
 
         public static async Task<AiMemoryConfig> LoadAsync(CancellationToken ct = default)
         {
@@ -297,7 +319,11 @@ namespace AiMemory.Configuration
 
             try
             {
-                Directory.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                const int mode = 448; // 0o700: UserRead | UserWrite | UserExecute
+                if (!UnixFileModeMethods.SetDirectoryMode(directory, mode))
+                {
+                    MonoUnixSetMode(directory, mode);
+                }
             }
             catch
             {
@@ -314,12 +340,33 @@ namespace AiMemory.Configuration
 
             try
             {
-                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                const int mode = 384; // 0o600: UserRead | UserWrite
+                if (!UnixFileModeMethods.SetFileMode(path, mode))
+                {
+                    MonoUnixSetMode(path, mode);
+                }
             }
             catch
             {
                 // Best effort; doctor reports weak permissions.
             }
+        }
+
+        private static void MonoUnixSetMode(string path, int mode)
+        {
+            // Fallback for runtimes/targeting packs that do not expose SetUnixFileMode.
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = "chmod",
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            process.StartInfo.ArgumentList.Add(mode.ToString("o", CultureInfo.InvariantCulture));
+            process.StartInfo.ArgumentList.Add(path);
+            process.Start();
+            process.WaitForExit();
         }
 
         public static string ExpandPath(string path)
@@ -380,6 +427,51 @@ namespace AiMemory.Configuration
             public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
             public string EmbeddingModel { get; set; } = "bge-m3";
             public string SemanticModel { get; set; } = "qwen2.5-coder:7b";
+        }
+    }
+
+    internal static class UnixFileModeMethods
+    {
+        public static bool SetDirectoryMode(string path, int mode)
+        {
+            try
+            {
+                var method = typeof(Directory).GetMethod("SetUnixFileMode", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (method is null)
+                {
+                    return false;
+                }
+
+                var unixModeType = method.GetParameters().Last().ParameterType;
+                var enumValue = Enum.ToObject(unixModeType, mode);
+                method.Invoke(null, [path, enumValue]);
+                return true;
+            }
+            catch (PlatformNotSupportedException) { return false; }
+            catch (MissingMethodException) { return false; }
+            catch (TypeLoadException) { return false; }
+            catch (System.Reflection.TargetInvocationException ex) when (ex.InnerException is PlatformNotSupportedException) { return false; }
+        }
+
+        public static bool SetFileMode(string path, int mode)
+        {
+            try
+            {
+                var method = typeof(File).GetMethod("SetUnixFileMode", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (method is null)
+                {
+                    return false;
+                }
+
+                var unixModeType = method.GetParameters().Last().ParameterType;
+                var enumValue = Enum.ToObject(unixModeType, mode);
+                method.Invoke(null, [path, enumValue]);
+                return true;
+            }
+            catch (PlatformNotSupportedException) { return false; }
+            catch (MissingMethodException) { return false; }
+            catch (TypeLoadException) { return false; }
+            catch (System.Reflection.TargetInvocationException ex) when (ex.InnerException is PlatformNotSupportedException) { return false; }
         }
     }
 }

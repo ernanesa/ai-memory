@@ -1,82 +1,119 @@
-# AI Memory Tool
+# AI Memory
 
-Plataforma local de memória para agentes de IA usando **Ollama + bge-m3 + PostgreSQL + pgvector + .NET Tool + MCP**.
+**Memória local de engenharia para agentes de IA.** Indexa código, regras de negócio e conhecimento técnico dos seus projetos .NET e expõe tudo via **MCP (Model Context Protocol)** sobre STDIO para Rider, VS Code, Cursor, Codex, Claude Desktop, Antigravity, opencode — sem mandar seu código para a nuvem e reduzindo drasticamente os tokens gastos em cada resposta.
 
-> Este projeto foi criado para ser aberto no Rider ou VS Code. O arquivo `.csproj` já está pronto para ser tratado como uma aplicação console empacotável como `dotnet tool`.
+> Stack: **.NET 10 + Ollama (bge-m3) + PostgreSQL/pgvector + Roslyn + Avalonia + MCP 2025-11-25**.
 
 ---
 
-## Objetivo
+## Para que serve
 
-Criar uma memória local para agentes capaz de:
-
-- indexar múltiplos projetos;
-- armazenar trechos de código, documentação e regras de negócio;
-- consultar contexto relevante antes de responder;
-- reduzir tokens enviados ao LLM;
-- integrar Rider, VS Code e Codex por MCP.
-
-Arquitetura:
+Agentes de IA dentro das IDEs (Rider, VS Code, Cursor, Codex, Claude Desktop, etc.) respondem melhor quando conhecem o seu código — mas reenviar arquivos inteiros a cada pergunta custa tokens, latência e contexto. O `ai-memory` resolve isso mantendo uma **memória local pesquisável** que o agente consulta antes de responder:
 
 ```text
-Rider / VS Code / Codex
-        │
-        ▼
- ai-memory mcp
-        │
- ┌──────┴─────────┐
- ▼                ▼
-Ollama         PostgreSQL
-bge-m3          pgvector
-        ▲
-        │
- ai-memory index/watch
-        ▲
-        │
-  Projetos locais
+modelo LLM       = raciocina
+bge-m3           = transforma texto em vetor (embedding)
+pgvector         = encontra contexto semanticamente parecido
+Roslyn           = entende a estrutura do C# (símbolos, hierarquia, chamadas)
+ai-memory        = mantém tudo atualizado (index, watch, tray, dashboard)
+MCP (STDIO)      = conecta essa memória ao agente dentro da IDE
 ```
+
+Com isso um agente consegue, por exemplo:
+
+- responder "onde valida limite de crédito?" lendo 1 resultado semântico em vez de varrer o repositório;
+- descobrir quem chama um método (`get_symbol_callers`) antes de refatorar;
+- conhecer regras de negócio (`search_business_rules`) extraídas do próprio código;
+- conhecer decisões arquiteturais (`search_knowledge`) sem reabrir ADRs.
+
+Tudo roda **100% local** — nenhum fonte, embedding ou prompt sai da sua máquina, exceto para o Ollama que normalmente também é local.
 
 ---
 
-## 1. Instalação, atualização e remoção da tool
+## Arquitetura
 
-O pacote é distribuído como **.NET global tool** com `PackageId` `AiMemory.Tool` e comando `ai-memory`.
-
-Para gerar o pacote localmente:
-
-```bash
-dotnet pack -c Release
+```text
+Rider / VS Code / Cursor / Codex / Claude / opencode / Antigravity
+                       │  (MCP over STDIO — protocol 2025-11-25)
+                       ▼
+                ai-memory mcp   ← 7 ferramentas só-leitura
+                       │
+        ┌──────────────┼───────────────────┐
+        ▼              ▼                    ▼
+   PostgreSQL     Ollama (bge-m3)      Roslyn (AST C#)
+   + pgvector     qwen2.5-coder:7b     grafo de símbolos
+   (RRF híbrido)  (embeddings/LLM)    (calls/inherits/implements)
+        ▲
+        │  upsert / search / graph
+        │
+   ai-memory index         ai-memory watch         ai-memory tray
+   (chunks→rules→knowledge) (FileSystemWatcher)    (Avalonia, autostart)
+        ▲
+        │
+   Projetos .NET locais (workspaces multi-projeto)
 ```
 
-Instalar a partir do pacote local gerado em `bin/Release`:
+Componentes principais:
+
+| Componente | Localização | Responsabilidade |
+|---|---|---|
+| CLI `ai-memory` | `ai-memory.csproj` → NuGet `AiMemory.Tool` | Setup, indexação, busca, dashboard, MCP, skills/workflows, gerência da bandeja |
+| Tray `ai-memory-tray` | `AiMemory.Tray.csproj` → NuGet `AiMemory.Tray` | Monitor visual na bandeja do sistema (Avalonia) |
+| Config | `Configuration/` | `~/.ai-memory/config.json` + `~/.aimemory/patterns.json` |
+| SQL | `sql/000_schema.sql`, `010_compat.sql`, `020_hybrid_search.sql` | Schema, migrações compatíveis, busca híbrida (FTS + vetorial) |
+| Serviços | `Services/` (20 arquivos) | Chunking, repositórios, extração, reranking, compressão, ícone da bandeja, etc. |
+| Comandos | `Commands/` | `index`, `search`, `watch`, `doctor`, `setup`, `workspace`, `project`, `mcp`, `dashboard`, `skills`, `tray` |
+| AI config | `ai-config-files/` | Prompts, skills e workflows reutilizáveis para agentes/IDEs/CLIs |
+| Testes | `tests/AiMemory.Tests/` | 36 unit + 5 integração (xUnit + FluentAssertions + Testcontainers) |
+| CI/CD | `.github/workflows/ci.yml`, `release.yml` | Build/teste 3 OS + publish NuGet em tags `v*` |
+
+---
+
+## Instalação, atualização e remoção
+
+O `ai-memory` é distribuído como **.NET global tool** com `PackageId = AiMemory.Tool` e comando `ai-memory`. A bandeja é um **segundo pacote** (`AiMemory.Tray`, comando `ai-memory-tray`) para não arrastar dependências Avalonia para a CLI/MCP.
+
+### Pré-requisitos
+
+- **.NET SDK 10.0.x** — instalador oficial em <https://dotnet.microsoft.com>.
+- **PostgreSQL 14+** com extensão **pgvector** (instalada automaticamente pelo `setup`).
+- **Ollama** rodando localmente (com `bge-m3` para embeddings e, opcionalmente, `qwen2.5-coder:7b` para extração semântica).
+- Para os testes de integração: **Docker** (Testcontainers sobe `pgvector/pgvector:pg17`).
+
+### Instalar a partir do pacote local (build do repo)
 
 ```bash
+git clone <este-repo> && cd ai-memory
+dotnet pack ai-memory.csproj -c Release
 dotnet tool install --global --add-source ./bin/Release AiMemory.Tool
 ```
 
-Instalar uma versão específica a partir de um feed NuGet empresarial:
+### Instalar uma versão específica de um feed NuGet
 
 ```bash
-dotnet tool install --global AiMemory.Tool --version 0.1.5 --add-source <feed-nuget-da-empresa>
+dotnet tool install --global AiMemory.Tool --version 0.2.4 --add-source <feed-nuget-da-empresa>
 ```
 
-Atualizar a versão instalada:
+### Atualizar a versão instalada
 
 ```bash
-dotnet tool update --global AiMemory.Tool --version 0.1.5 --add-source <feed-nuget-da-empresa>
-ai-memory tray update
+dotnet tool update --global AiMemory.Tool --version 0.2.4 --add-source <feed-nuget-da-empresa>
+ai-memory tray update   # recria o autostart apontando para o shim atual
 ```
 
-Remover a tool:
+### Remover a tool
 
 ```bash
-ai-memory tray remove
+ai-memory tray remove               # remove autostart da bandeja
 dotnet tool uninstall --global AiMemory.Tool
+dotnet tool uninstall --global AiMemory.Tray   # se a bandeja estiver instalada
 ```
 
-> Rode `ai-memory tray update` depois de atualizar a tool para recriar o autostart da bandeja apontando para o shim/executável atual.
+> Rode `ai-memory tray update` depois de qualquer `dotnet tool update` para recriar o atalho de autostart apontando para o shim/executável atual.
 
-## 2. Setup
+---
+
+## Setup (primeira vez)
 
 Depois de instalar a tool:
 
@@ -84,430 +121,242 @@ Depois de instalar a tool:
 ai-memory setup
 ```
 
-O setup funciona em duas fases:
+O `setup` é um wizard interativo que:
 
-1. Coleta todas as respostas do usuário: banco, host, porta, usuário/senha opcionais do PostgreSQL, URL do Ollama, modelo de embedding, workspaces, projetos e ações automáticas permitidas.
-2. Executa o plano até o fim sem novas perguntas.
+1. **Coleta** todas as respostas do usuário: banco, host, porta, usuário/senha opcionais do PostgreSQL, URL do Ollama, modelo de embedding, modelo semântico, workspaces, projetos e ações automáticas permitidas.
+2. **Executa** o plano até o fim sem novas perguntas.
+3. **Pergunta se deseja instalar as skills/workflows** do `ai-memory` ao final da configuração.
 
-Na etapa de workspaces, informe um nome como `claps` ou `pagueOn`. Para cada workspace, informe um diretório de projeto por vez. O nome do projeto é inferido automaticamente pelo nome da pasta. Quando não quiser adicionar mais projetos naquele workspace, pressione Enter sem preencher o diretório. Depois o setup pergunta se deseja configurar outro workspace.
+Na etapa de **workspaces**, informe um nome (ex: `claps` ou `pagueOn`). Para cada workspace, informe um diretório de projeto por vez — o nome do projeto é inferido pelo nome da pasta. Pressione **Enter** vazio para fechar o workspace; depois o setup pergunta se deseja configurar outro workspace.
 
-Durante a execução, a interface usa cores para destacar estados, perguntas, avisos e sucesso. Logs de instalação e comandos externos são compactados: o setup exibe apenas as últimas linhas relevantes em cor discreta, mantendo a interação principal legível. Downloads de modelos via `ollama pull` são exceção: a saída é exibida em tempo real para acompanhar o progresso. Ao final, ele mostra um resumo colorido com o que foi concluído, ignorado ou ficou pendente.
+A interface usa **cores** para destacar estados, perguntas, avisos e sucesso. Logs de instalação e comandos externos são compactados (apenas últimas linhas relevantes), mantendo a interação legível — a única exceção é `ollama pull`, exibido em tempo real. Ao final, exibe um resumo colorido do que foi concluído, ignorado ou ficou pendente.
 
-Quando possível, ele também automatiza a preparação local:
+### O que o setup automatiza (conforme a plataforma)
 
-- instala dependências do host conforme a plataforma:
-  - macOS: `brew` para PostgreSQL, `pgvector` e Ollama;
-  - Ubuntu: `apt` para PostgreSQL e `pgvector`, e instalador oficial do Ollama;
-  - Windows: `winget` para PostgreSQL e Ollama;
-- inicia PostgreSQL e Ollama conforme a plataforma:
-  - macOS: `brew services`;
-  - Ubuntu: `systemctl`;
-  - Windows: serviço do PostgreSQL e `ollama serve` em background;
-- cria o banco `ai_memory` usando conexão PostgreSQL via Npgsql, sem depender do comando `createdb`;
-- aplica o schema SQL;
+| Plataforma | Dependências | Início dos serviços |
+|---|---|---|
+| **macOS** | `brew install postgresql`, `pgvector`, `ollama` | `brew services start ...` |
+| **Ubuntu/Debian** | `apt install postgresql`, `postgresql-contrib`, `postgresql-{ver}-pgvector` (fallback build local do pgvector v0.8.2); `curl install.sh \| sh` para Ollama | `systemctl start postgresql` / `ollama` |
+| **Windows 11** | `winget install PostgreSQL.PostgreSQL.18` e `Ollama.Ollama` (instaladores interativos); build do pgvector via `nmake` se houver VS Build Tools | serviço Windows do PostgreSQL + `ollama serve` em background |
+
+Comum a todas as plataformas:
+
+- cria o banco `ai_memory` via Npgsql (sem depender do comando `createdb`);
+- aplica o schema SQL (`sql/*.sql`);
 - lista modelos disponíveis no Ollama;
-- baixa os modelos escolhidos, por padrão `bge-m3` e `qwen2.5-coder:7b`.
+- baixa os modelos escolhidos (padrão `bge-m3` + `qwen2.5-coder:7b`);
+- instala e habilita o autostart da bandeja (se houver sessão gráfica);
+- oferece a instalação do pack de skills/workflows em todos os alvos detectados ou apenas nos selecionados.
 
-Observações por plataforma:
+### Observações por plataforma
 
-- no macOS, o usuário padrão do PostgreSQL costuma ser o usuário atual do sistema;
-- no Ubuntu e no Windows, o setup sugere `postgres` como padrão;
-- host e porta do PostgreSQL são opcionais no setup e usam `localhost` e `5432` por padrão;
-- no Ubuntu, o setup tenta instalar `pgvector` pelo pacote compatível com a versão do PostgreSQL e faz fallback para build local quando necessário;
-- no Windows, a instalação via `winget` usa os instaladores interativos dos pacotes;
-- no Windows, o `pgvector` pode exigir instalação manual no servidor PostgreSQL se as build tools do Visual Studio não estiverem disponíveis no terminal atual.
+- **macOS**: usuário padrão do PostgreSQL costuma ser o usuário atual do sistema.
+- **Ubuntu/Windows**: setup sugere `postgres` como padrão.
+- Host e porta do PostgreSQL são **opcionais** (default `localhost` / `5432`).
+- **Ubuntu**: `pgvector` é tentado pelo pacote compatível com a versão do PostgreSQL, com fallback para build local.
+- **Windows**: `pgvector` pode exigir instalação manual no servidor se as build tools do Visual Studio não estiverem disponíveis no terminal atual.
 
-Se o gerenciador de pacotes da plataforma não estiver disponível, se o `pgvector` ainda não estiver presente no servidor, ou se algum serviço não puder ser iniciado automaticamente, o setup mostra o que faltou e pode ser executado novamente depois do ajuste.
-
----
-
-## 3. Tray Application (Bandeja do Sistema)
-
-Criamos uma aplicação visual complementar para a barra de tarefas/bandeja do sistema chamada **`AiMemory.Tray`**, escrita com **Avalonia UI** no .NET 10. Ela permite monitorar visualmente se o servidor MCP está sendo ativamente consumido pelas IDEs (Rider/VS Code/Cursor/Codex).
-
-### Funcionalidades:
-* **Ícone Dinâmico**: Fica **cinza** quando ocioso e **azul ciano brilhante** quando uma IDE estabelece conexão com o servidor MCP (monitoramento de processos em background a cada 4 segundos).
-* **Menu de Contexto**:
-  * **Indexar Workspace**: Dispara a reindexação do código e do grafo de símbolos em background (`ai-memory index`) e notifica o usuário via pop-up do sistema quando o build/index estiver completo.
-  * **Testar Banco de Dados**: Executa um ping assíncrono para verificar se a base PostgreSQL configurada em `config.json` está respondendo.
-  * **Sair**: Fecha a aplicação com segurança.
-* **Notificações Nativas do SO**: Integra-se de forma leve com as ferramentas nativas de cada sistema operacional:
-  * **Linux (GNOME Wayland no Ubuntu / KDE no BigLinux)**: Usa o `notify-send`.
-  * **macOS**: Usa o `osascript` (AppleScript).
-  * **Windows 11**: Usa balões de bandeja acionados por scripts ocultos em `PowerShell`.
-
-### Como gerenciar e executar a bandeja (System Tray):
-
-A instalação e a configuração de inicialização automática (autostart) são integradas diretamente ao comando de setup principal do sistema (`ai-memory setup`).
-
-No entanto, com foco em facilitar a distribuição via **NuGet** e permitir controle isolado da bandeja, a CLI disponibiliza o comando `ai-memory tray` e seus subcomandos:
-
-#### 1. Executar a bandeja manualmente
-Você pode abrir o monitor da bandeja do sistema a qualquer momento executando:
-```bash
-ai-memory tray
-```
-
-#### 2. Instalar a inicialização automática (Autostart)
-Configura a bandeja para rodar automaticamente ao iniciar o sistema operacional:
-```bash
-ai-memory tray install
-```
-* **macOS:** Cria um LaunchAgent (`~/Library/LaunchAgents/com.aimemory.tray.plist`) com `ProgramArguments`, `WorkingDirectory`, `PATH` mínimo e logs em `~/Library/Logs/AiMemory`, registrando via `launchctl bootstrap`/`kickstart` quando disponível.
-* **Linux:** Cria um arquivo de inicialização automática (`~/.config/autostart/ai-memory-tray.desktop`).
-* **Windows:** Cria um atalho `.lnk` na pasta de inicialização rápida (`Startup`).
-
-> [!NOTE]
-> A bandeja resolve primeiro o shim da global tool (`~/.dotnet/tools/ai-memory` ou `%USERPROFILE%\.dotnet\tools\ai-memory.exe`), depois apphost publicado e, por fim, `dotnet ai-memory.dll`. Isso evita o erro comum de autostart apontando para `dotnet run` ou para um caminho interno temporário.
-
-#### 3. Verificar o status da bandeja
-Mostra se os atalhos de inicialização rápida estão instalados, onde estão os arquivos e se o processo do tray está rodando em segundo plano:
-```bash
-ai-memory tray status
-```
-
-#### 4. Atualizar a bandeja
-Recria os atalhos de autostart apontando para o executável atual. Útil se você atualizou a versão do `ai-memory` via NuGet e deseja remapear o link de inicialização:
-```bash
-ai-memory tray update
-```
-
-#### 5. Desinstalar a bandeja
-Remove os atalhos de inicialização automática do sistema operacional e encerra qualquer processo da bandeja rodando em background:
-```bash
-ai-memory tray uninstall
-ai-memory tray remove
-```
-
-#### 6. Assistente interativo da bandeja
-Abre um menu simples para instalar, atualizar o vínculo de autostart ou remover a bandeja:
-```bash
-ai-memory tray setup
-```
-
-O comando literal `ai-memory-tray setup` exigiria um segundo pacote/wrapper de .NET tool com outro `ToolCommandName`. O pacote atual publica um único comando, `ai-memory`; por isso o fluxo suportado neste pacote é `ai-memory tray setup`.
+Se o gerenciador de pacotes, `pgvector` ou algum serviço não puderem ser automatizados, o setup mostra o que faltou e pode ser **re-executado** depois do ajuste manual.
 
 ---
 
----
+## Uso
 
-## 3. Para que servem as tabelas
-
-### `ai_workspaces`
-
-Guarda grupos de projetos.
-
-Um workspace representa um recorte de trabalho, cliente, produto ou contexto que pode conter vários projetos.
-
-### `ai_projects`
-
-Guarda os projetos indexados.
-
-O projeto é identificado principalmente pelo `root_path`, permitindo que o mesmo projeto participe de mais de um workspace.
-
-### `ai_workspace_projects`
-
-Guarda o vínculo entre workspaces e projetos.
-
-Permite a relação muitos-para-muitos:
-
-- um workspace pode ter vários projetos;
-- um projeto pode aparecer em vários workspaces.
-
-Isso evita misturar os 12+ projetos em uma única massa sem contexto, sem duplicar o mesmo projeto quando ele for reutilizado por mais de um workspace.
-
-### `ai_chunks`
-
-Guarda pedaços semânticos dos arquivos:
-
-- classe;
-- método;
-- procedure SQL;
-- seção markdown;
-- arquivo de configuração.
-
-Cada chunk possui:
-
-- conteúdo original;
-- hash;
-- embedding;
-- arquivo de origem;
-- projeto;
-- linguagem;
-- símbolo.
-
-### `ai_business_rules`
-
-Guarda regras de negócio extraídas do código ou documentação.
-
-Exemplo:
-
-```text
-Cliente bloqueado não pode gerar nova cobrança.
-```
-
-Para aumentar confiabilidade, regras podem ser registradas como:
-
-- `candidate`: descoberta ainda não revisada;
-- `accepted`: regra validada;
-- `rejected`: falso positivo ou regra obsoleta.
-
-Cada regra pode guardar evidência (`evidence`), símbolo de origem (`symbol_name`) e vínculo com o chunk (`chunk_id`). Regra sem evidência deve ser tratada como hipótese, não como fato consolidado.
-
-### `ai_knowledge`
-
-Guarda conhecimento de engenharia:
-
-- decisões arquiteturais;
-- padrões do time;
-- convenções;
-- integrações;
-- riscos;
-- observações geradas pelos agentes.
-
-Assim como regras de negócio, registros de conhecimento podem ser:
-
-- `candidate`: descoberta ainda não revisada;
-- `accepted`: conhecimento validado;
-- `rejected`: falso positivo ou informação obsoleta.
-
-Cada registro pode guardar evidência (`evidence`), símbolo de origem (`symbol_name`) e vínculo com o chunk (`chunk_id`). Conhecimento sem evidência deve ser tratado como inferência, não como fato consolidado.
-
-### `ai_extraction_chunk_state`
-
-Controla o processamento incremental das fases de extração.
-
-Guarda, por chunk e por fase (`rules` ou `knowledge`):
-
-- `content_hash`: versão do conteúdo processado;
-- `status`: `processed` ou `failed`;
-- `processed_at`: quando a fase processou o chunk;
-- `error`: erro da última tentativa, quando houver.
-
-Isso permite que `ai-memory index rules --candidate-limit 2000` processe lotes diferentes a cada execução. Chunks já processados são ignorados enquanto o `content_hash` não mudar. Se um arquivo for reindexado ou atualizado pelo `watch`, o hash do chunk muda e ele volta a ser candidato para `rules` e `knowledge`.
-
----
-
-## 4. Estratégia de chunking recomendada
-
-A qualidade do sistema depende mais do chunking do que do banco vetorial.
-
-### Regra principal
-
-Não dividir por número fixo de caracteres como primeira escolha.
-
-Dividir por significado.
-
-### C#
-
-Implementação atual: parser Roslyn para arquivos `.cs`, com fallback textual simples quando não houver tipos reconhecíveis.
-
-Preferência:
-
-```text
-classe pequena     -> 1 chunk
-método relevante   -> 1 chunk
-classe grande      -> vários chunks por método/propriedade
-interface/record   -> 1 chunk
-```
-
-Metadados desejados:
-
-```text
-language = csharp
-chunk_type = type | member | file
-symbol_name = NomeDaClasseOuMetodo
-```
-
-### SQL
-
-Dividir por:
-
-```text
-procedure
-view
-function
-trigger
-bloco separado por GO
-```
-
-### Markdown
-
-Dividir por:
-
-```text
-# título
-## seção
-### subseção
-```
-
-### JSON/YAML/config
-
-Dividir por objeto principal ou arquivo inteiro quando pequeno.
-
-### Arquivos ignorados
-
-Quando o projeto está dentro de um repositório Git, a enumeração de arquivos usa `git ls-files --cached --others --exclude-standard`, respeitando `.gitignore`, `.git/info/exclude` e excludes globais do Git. Fora de um repositório Git, ou se o comando `git` não estiver disponível, a tool usa os ignores fixos abaixo:
-
-```text
-.git/
-bin/
-obj/
-node_modules/
-dist/
-coverage/
-packages/
-.idea/
-.vs/
-.vscode/
-```
-
-Além dos diretórios acima, arquivos C# de migrations geradas pelo Entity Framework são ignorados na indexação de chunks e nas fases `rules`/`knowledge`. A detecção não depende apenas do caminho: a tool procura estrutura/conteúdo típico de EF, como classes que herdam `Migration` ou `ModelSnapshot`, atributos `[Migration]`/`[DbContext]`, `MigrationBuilder` e `BuildTargetModel`. Ao rodar `index chunks`, chunks antigos de arquivos identificados como migrations EF também são removidos do escopo do workspace/projeto indexado.
-
-Projetos e arquivos de teste também são ignorados por padrão em `chunks`, `rules` e `knowledge`. A detecção considera projetos com `Microsoft.NET.Test.Sdk`, `xunit`, `NUnit`, `MSTest`, `<IsTestProject>true</IsTestProject>` ou `coverlet.collector`, além de arquivos C# com atributos como `[Fact]`, `[Theory]`, `[Test]`, `[TestMethod]`, `[TestClass]`, `[TestFixture]`, `[SetUp]` e nomes/pastas comuns como `Tests`, `UnitTests`, `IntegrationTests` e `Specs`. Ao rodar `index chunks`, chunks antigos identificados como teste também são removidos do escopo do workspace/projeto indexado.
-
-### Tamanho máximo sugerido
-
-Começar com chunks de até aproximadamente 6.000 caracteres.
-
-Depois evoluir para:
-
-- parser SQL;
-- extração de símbolos;
-- relacionamento entre classes, interfaces e chamadas.
-
----
-
-## 5. Uso
+### Workflow recomendado
 
 ```bash
-ai-memory setup
-ai-memory workspace list
-ai-memory workspace add claps
-ai-memory workspace use claps
-ai-memory project add
-ai-memory project add --workspace pagueOn
-ai-memory project list --workspace claps
-ai-memory index
-ai-memory index --semantic
-ai-memory index --workspace claps
-ai-memory index chunks --project gestor --workspace claps
-ai-memory index rules knowledge --workspace claps
-ai-memory search "onde valida limite de crédito?"
-ai-memory watch
-ai-memory dashboard
-ai-memory dashboard serve
-ai-memory tray setup
-ai-memory tray install
-ai-memory tray status
-ai-memory tray update
-ai-memory tray remove
-ai-memory mcp
+ai-memory setup                 # primeira vez; também oferece instalar skills/workflows
+ai-memory index                 # chunks -> rules -> knowledge
+ai-memory mcp                   # deixa o servidor MCP rodando para as IDEs
+# (ou adicione a config de MCP da sua IDE e ela começará sozinha)
+ai-memory watch                 # opcional: reindexa ao salvar arquivos
+ai-memory tray                  # opcional: abre a bandeja do sistema
+ai-memory dashboard serve       # opcional: dashboard web em http://localhost:5050
 ```
 
-O dashboard possui dois modos:
+### Indexação (pipeline em fases)
 
-```bash
-ai-memory dashboard
-ai-memory dashboard --workspace claps
-ai-memory dashboard --project clapsapi
-ai-memory dashboard serve
-ai-memory dashboard serve --port 5050
-```
-
-O comando `dashboard` mostra um resumo no terminal. O comando `dashboard serve` inicia uma interface web local, por padrão em `http://localhost:5050`.
-
-O comando `index` é organizado por fases:
-
-```bash
-ai-memory index
-ai-memory index chunks
-ai-memory index rules
-ai-memory index knowledge
-ai-memory index chunks rules
-ai-memory index rules knowledge
-ai-memory index chunks knowledge
-ai-memory index chunks rules knowledge
-ai-memory index chunks --project gestor --workspace claps
-ai-memory index rules knowledge --candidate-limit 10000
-ai-memory index rules knowledge --semantic --semantic-model qwen2.5-coder:7b --candidate-limit 500
-ai-memory index rules knowledge --semantic --refresh --candidate-limit 500
-```
-
-Sem fases explícitas, `ai-memory index` representa o pipeline completo:
+`ai-memory index` executa por padrão o pipeline completo:
 
 ```text
 chunks -> rules -> knowledge
 ```
 
-As fases são:
+Fases:
 
-- `chunks`: lê os arquivos dos projetos configurados, quebra em chunks, gera embeddings e grava em `ai_chunks`;
-- `rules`: usa chunks já indexados para extrair/reconciliar regras de negócio em `ai_business_rules`;
-- `knowledge`: usa chunks já indexados para extrair/reconciliar conhecimento técnico em `ai_knowledge`.
+- **`chunks`** — lê os arquivos dos projetos configurados, quebra em chunks via **Roslyn** (C#), regex (SQL), headers (Markdown) ou size-split (JSON/config), gera embeddings via Ollama `bge-m3` e grava em `ai_chunks`. Também constrói o **grafo de símbolos** Roslyn (classes, interfaces, métodos, herança, chamadas) em `ai_symbols` / `ai_symbol_relations`.
+- **`rules`** — usa chunks já indexados para extrair/reconciliar **regras de negócio** heurísticas (ou semânticas com `--semantic`) e gravar em `ai_business_rules`. Sinais considerados: exceções de domínio, FluentValidation, padrões `ErroContext` / `AddFailure` / `RuleFor`, termos pt-BR como *bloqueado*, *cancelado*, *vencido*, *elegível*, *permite*.
+- **`knowledge`** — usa chunks já indexados para extrair/reconciliar **conhecimento técnico** (integrações, padrões, riscos técnicos, arquitetura, configuração) em `ai_knowledge`. Sinais: `HttpClient`, `MassTransit`/`RabbitMQ`/`Kafka`, `MediatR`, `Entity Framework`, `TODO`/`FIXME`/`HACK`.
 
-O filtro de projeto deve ser informado com `--project`. A sintaxe antiga `ai-memory index gestor --workspace claps` é aceita temporariamente por compatibilidade, mas deve ser substituída por `ai-memory index --project gestor --workspace claps`.
-
-As fases `rules` e `knowledge` fazem extração heurística conservadora a partir dos chunks já indexados. Elas criam novos candidatos, buscam evidências para candidatos existentes, atualizam confiança e mantêm `accepted`/`rejected` como estados explícitos de revisão. Candidatos nunca são promovidos automaticamente para `accepted`.
-
-Essas fases são incrementais por `content_hash`. A tool processa chunks candidatos que nunca foram processados naquela fase, que falharam anteriormente ou cujo conteúdo mudou desde a última extração.
-
-A extração de `rules` e `knowledge` ignora chunks que pareçam migrations geradas pelo Entity Framework ou código de teste, mesmo que esses chunks já existam no banco de uma indexação anterior. Isso evita gastar embedding/modelo semântico com `Migration`, `*.Designer.cs`, `*ModelSnapshot.cs`, asserts, fixtures, mocks e cenários artificiais que normalmente não são a melhor fonte de regras de negócio.
-
-A fase `rules` considera sinais explícitos de regra de negócio, incluindo exceções de domínio, validações, FluentValidation e padrões de erro/notificação como `ErroContext`, `ErrosContext`, `AdicionarErro`, `AddErro`, `AddFailure`, `AddNotification`, `Notificar`, `RuleFor`, `Validator`, `TemErro`, `HasError`, `IsValid` e termos de domínio como bloqueado, cancelado, vencido, elegível e permitido.
-
-Com `--semantic`, as fases `rules` e `knowledge` usam extração semântica nos chunks candidatos, mas continuam respeitando o estado incremental: chunks já processados com o mesmo `content_hash` são ignorados. A tool chama o modelo informado por `--semantic-model` ou `AI_MEMORY_SEMANTIC_MODEL`, pede JSON estruturado, exige evidência copiada do próprio chunk e descarta itens sem evidência. Esse modo é mais lento, mas ajuda na descoberta inicial de projetos com padrões de validação, erro ou arquitetura que a heurística ainda não conhece.
-
-Para `rules --semantic`, a seleção passa por um gate antes de chamar o modelo: handlers, services, application/domain services, use cases, policies, specifications e queries com sinais de decisão/regra são priorizados; migrations, mappings EF, DTOs simples, interfaces puras, constants/configurations/options e fatos técnicos evidentes são evitados. Depois da resposta do modelo, a tool rejeita candidatos que pareçam apenas constante, GUID, assinatura de método, capacidade de consulta ou descrição técnica, como `permite obter`, `busca`, `retorna` ou `cria lista`, quando não houver restrição/decisão de domínio.
-
-Use `--refresh` quando quiser revisitar todos os chunks que combinam com o escopo da fase, mesmo que já estejam marcados como processados. Isso é útil quando a estratégia de extração mudou e você quer refazer a análise, por exemplo:
+As fases `rules` e `knowledge` são **incrementais por `content_hash`**: chunks já processados com o mesmo hash são ignorados. Se o conteúdo mudar (reindexação ou `watch`), o chunk volta a ser candidato. Candidatos são sempre gravados como `candidate` — **nunca** são auto-promovidos para `accepted` (isso é revisão humana explícita). Regras `rejected` não são reativadas automaticamente.
 
 ```bash
-ai-memory index rules knowledge --semantic --refresh --candidate-limit 500
-```
-
-Durante `chunks`, `rules` e `knowledge`, a tool mostra um painel de progresso com 4 linhas em terminais interativos, atualizado a cada 1 segundo sem ficar gerando novas linhas continuamente. O painel mostra fase, progresso, tempo decorrido, ETA, contadores, arquivo/símbolo atual e taxa média em formato tabular. Quando a saída é redirecionada para arquivo, pipe ou CI, a tool volta para logs lineares para evitar códigos de cursor no arquivo. O ETA é exibido como aproximação arredondada e suavizada, por exemplo `eta ~11h45m`, porque chamadas de LLM podem variar muito entre chunks e uma precisão em segundos tende a oscilar sem representar melhor o tempo real. Essas etapas podem demorar porque cada chunk ou candidato precisa gerar embedding antes de ser salvo.
-
-Por padrão, `rules` e `knowledge` analisam todos os chunks candidatos encontrados no escopo. Para limitar o recorte:
-
-```bash
-ai-memory index rules --candidate-limit 5000
-ai-memory index knowledge --candidate-limit 10000
+ai-memory index                          # pipeline completo
+ai-memory index chunks                   # só chunks
+ai-memory index rules                    # só rules
+ai-memory index knowledge                # só knowledge
+ai-memory index chunks rules             # fases selecionadas
 ai-memory index rules knowledge --candidate-limit 2000
-ai-memory index rules knowledge --semantic --candidate-limit 500
+
+# escopo por projeto/workspace
+ai-memory index --project gestor --workspace claps
+ai-memory index chunks --project gestor --workspace claps
+
+# extração semântica (mais lenta, usa LLM)
+ai-memory index rules knowledge --semantic
+ai-memory index rules knowledge --semantic --semantic-model qwen2.5-coder:7b --candidate-limit 500
 ai-memory index rules knowledge --semantic --refresh --candidate-limit 500
+
+# controle de paralelismo dos embeddings
+ai-memory index --parallelism 4
 ```
 
-A saída inicial de `rules` e `knowledge` mostra uma tabela de escopo com total de chunks, candidatos encontrados, já processados, novos pendentes, falhos, alterados por hash, acionáveis, selecionados, `refresh` e `candidate limit`. Quando nenhum `--candidate-limit` é informado, a tool mostra um aviso em amarelo informando que todos os chunks candidatos selecionados serão processados, que a etapa pode demorar porque cada candidato gera embedding, e que é possível usar `--candidate-limit <n>` para processar um lote menor.
+**Sobre as flags de `index`:**
 
-O comando `ai-memory mcp` inicia o servidor MCP via STDIO. Ele já expõe ferramentas para agentes consultarem a memória local indexada:
+| Flag | Default | Descrição |
+|---|---|---|
+| `--workspace <nome>` | workspace ativo | Restringe a um workspace |
+| `--project <nome>` | todos do workspace | Restringe a um projeto (suporta filtro por nome) |
+| `--candidate-limit <n>` | sem limite | Máximo de chunks considerados por `rules`/`knowledge` |
+| `--semantic` | off | Usa extração semântica nas fases `rules`/`knowledge` (LLM) |
+| `--semantic-model <id>` | `qwen2.5-coder:7b` ou env `AI_MEMORY_SEMANTIC_MODEL` | Modelo Ollama usado pela extração semântica |
+| `--refresh` | off | Revisita TODOS os chunks do escopo, mesmo os já `processed` |
+| `--parallelism <n>` | auto: chunks `Clamp(cpu/2, 2, 6)`; rules/knowledge `4` | Concorrência máxima de embedding/upsert |
+| `--db <...>` | config | Nome do banco ou connection string completa |
+| `--ollama <url>` | config | URL base do Ollama |
+| `--model <id>` | config | Modelo de embedding Ollama |
 
-- `search_code`: busca semântica em código, documentação e arquivos de configuração;
-- `search_business_rules`: busca semântica em regras de negócio extraídas;
-- `find_related_files`: encontra arquivos relacionados a uma consulta ou a outro arquivo indexado.
+> Sintaxe antiga `ai-memory index gestor --workspace claps` ainda funciona (deprecated) e emite aviso para usar `--project gestor`.
 
-Variáveis opcionais:
+**Sobre o progresso:** durante `chunks`/`rules`/`knowledge`, a tool mostra um **painel de progresso de 4 linhas** em terminais interativos (fase, %, decorrido, ETA suavizado, contadores, arquivo/símbolo atual, taxa média), atualizado a cada 1s. Em pipe/CI/redirect ela cai para logs lineares. O ETA é arredondado (`eta ~11h45m`) porque chamadas de LLM variam entre chunks. Quando `--candidate-limit` é omitido e há candidatos, exibe um aviso amarelo sugerindo o uso do limit.
+
+**Exclusões automáticas** (em `chunks`, `rules` e `knowledge`):
+
+- Migrations geradas pelo **Entity Framework** (detectadas por conteúdo: `: Migration`, `: ModelSnapshot`, `[Migration(`, `[DbContext(`, `MigrationBuilder`, `BuildTargetModel`). Chunks antigos identificados como migrations também são removidos ao reindexar.
+- Código de **teste**: projetos com `Microsoft.NET.Test.Sdk`, `xunit`, `NUnit`, `MSTest`, `<IsTestProject>true</IsTestProject>`, `coverlet.collector`, e arquivos C# com `[Fact]`/`[Theory]`/`[Test]`/`[TestMethod]`/`[TestClass]`/`[TestFixture]`/`[SetUp]`, ou caminhos/pastas comuns (`Tests`, `UnitTests`, `IntegrationTests`, `Specs`). Chunks antigos de teste também são removidos ao reindexar.
+- Diretórios ignorados: `.git`, `bin`, `obj`, `node_modules`, `dist`, `coverage`, `packages`, `.idea`, `.vs`, `.vscode`. Dentro de um repo Git, o `git ls-files --cached --others --exclude-standard` respeita `.gitignore`, `.git/info/exclude` e excludes do Git.
+
+### Busca
 
 ```bash
-export AI_MEMORY_DB="Host=localhost;Database=ai_memory;Username=postgres"
-export AI_MEMORY_DB_HOST="localhost"
-export AI_MEMORY_DB_PORT="5432"
-export AI_MEMORY_DB_USER="postgres"
-export AI_MEMORY_DB_PASSWORD="senha"
-export AI_MEMORY_OLLAMA="http://localhost:11434"
-export AI_MEMORY_EMBED_MODEL="bge-m3"
-export AI_MEMORY_SEMANTIC_MODEL="qwen2.5-coder:7b"
+ai-memory search "onde valida limite de crédito?"
+ai-memory search "DbContext" --limit 20
 ```
 
-Se `AI_MEMORY_DB` contiver uma connection string completa, ela tem prioridade e o setup não pergunta `host`, `porta`, `usuário` e `senha` separadamente.
+| Flag | Default | Descrição |
+|---|---|---|
+| `<query>` (posicional, obrigatório) | — | Texto da busca |
+| `--limit <n>` | 10 | Máximo de resultados |
+| `--db`, `--ollama`, `--model` | config | Overrides |
 
-Durante o `setup`, a tool pode puxar os modelos Ollama ausentes usados pelo fluxo padrão: `bge-m3` para embeddings e `qwen2.5-coder:7b` para extração semântica. O progresso do `ollama pull` é exibido em tempo real.
+A busca é **híbrida**: usa HNSW vetorial (`embedding <=> $1`) + `ts_rank_cd(websearch_to_tsquery(...))` fundidos por **Reciprocal Rank Fusion** (`1/(60+rank)`). Depois um **reranker heurístico** promove matches exatos de símbolo e penaliza arquivos de config/docs em queries estruturais.
+
+### Watch
+
+```bash
+ai-memory watch
+```
+
+Um `FileSystemWatcher` (real, debounce de 500ms) reindexa apenas os arquivos alterados em extensões monitoradas (`.cs`, `.csproj`, `.sln`, `.sql`, `.json`, `.md`, `.yml`, `.yaml`, `.config`, `.props`, `.targets`, `.razor`, `.cshtml`). Ignora `bin/`, `obj/`, `.git/`. Arquivos deletados disparam limpeza de chunks órfãos; renomeações disparam delete+index. Pressione **Ctrl+C** para parar.
+
+### Dashboard
+
+```bash
+ai-memory dashboard                                # resumo no terminal
+ai-memory dashboard --workspace claps              # resumo de um workspace
+ai-memory dashboard --project clapsapi             # resumo de um projeto
+ai-memory dashboard serve                          # web UI em http://localhost:5050
+ai-memory dashboard serve --port 8080
+ai-memory dashboard serve --workspace claps --project clapsapi
+```
+
+`dashboard serve` abre uma SPA local (tabs: Overview, Projects, Chunks, Business Rules, Knowledge, Health) com endpoints JSON `/api/overview`, `/api/workspaces`, `/api/projects`, `/api/chunks`, `/api/business-rules`, `/api/knowledge`, `/api/health`. Filtros por query string: `workspace`, `project`, `q`, `limit`.
+
+### Workspace e Project
+
+```bash
+ai-memory workspace list
+ai-memory workspace add claps
+ai-memory workspace use claps
+ai-memory workspace remove claps
+
+ai-memory project add --workspace claps            # pede o diretório interativamente
+ai-memory project list --workspace claps
+ai-memory project remove gestor --workspace claps
+```
+
+Um **workspace** é um recorte de trabalho (cliente/produto/contexto). Um **projeto** é identificado pelo `root_path` e pode participar de mais de um workspace (relação muitos-para-muitos via `ai_workspace_projects`).
+
+### Skills e workflows
+
+```bash
+ai-memory skills list          # lista skills/workflows empacotados
+ai-memory skills detect        # detecta IDEs/CLIs/perfis/projetos de instalação
+ai-memory skills install       # pergunta onde instalar
+ai-memory skills install --all # instala em todos os alvos detectados
+```
+
+O comando `skills` instala o conteúdo de `ai-config-files/` em diretórios locais seguros para reaproveitamento por agentes, IDEs e CLIs. Ele sempre inclui um perfil local do `ai-memory` e tenta detectar alvos como:
+
+- perfil local `~/.ai-memory/agent-packs/dotnet10`;
+- projetos cadastrados no `~/.ai-memory/config.json` (`<projeto>/.ai/agent-packs/dotnet10`);
+- perfis/diretórios de Codex, Claude, opencode, Cursor e VS Code quando encontrados;
+- diretórios de projeto do Roo Code/opencode quando existirem dentro dos projetos configurados.
+
+> A instalação copia arquivos; ela não promete auto-discovery nativo em clientes que não tenham um padrão público/estável de skills. Quando o cliente não auto-descobrir, use o diretório instalado como fonte de prompt, skill, regra de projeto ou instrução compartilhada.
+
+### Doctor (validação do ambiente)
+
+```bash
+ai-memory doctor                       # relatório legível
+ai-memory doctor --json                # JSON para scripts/CI
+ai-memory doctor --strict --no-network # warnings viram falhas; pula rede
+```
+
+Verifica: config (incl. permissões `0600`/`0700` e presença de senha em `config.json`), workspaces/projetos (nomes e diretórios), PostgreSQL (`SELECT 1`), extensões obrigatórias (`vector`, `pgcrypto`) e opcionais (`uuid-ossp`), tabelas e colunas esperadas, status do schema (`ai_schema_migrations`), `ai_projects.id` como `integer`, e reachability do Ollama (skip com `--no-network`). Retorna **código 1** se houver falhas (ou warnings em `--strict`).
 
 ---
 
-## 6. Configuração MCP no Rider
+## Servidor MCP (`ai-memory mcp`)
 
-Em **Settings > Tools > AI Assistant > Model Context Protocol (MCP)**, adicionar servidor STDIO:
+Inicia o servidor **MCP sobre STDIO** (protocolo `2025-11-25`, JSON-RPC 2.0). É essa a ponte que as IDEs usam para consultar a memória do `ai-memory`.
+
+```bash
+ai-memory mcp
+ai-memory mcp --ollama http://gpu-box:11434 --model bge-m3
+```
+
+| Flag | Default | Descrição |
+|---|---|---|
+| `--db` | config | Nome do banco ou connection string completa |
+| `--ollama` | config | URL base do Ollama |
+| `--model` | config | Modelo de embedding Ollama |
+
+> O stdout é silenciado durante a execução para não corromper o stream JSON-RPC; logs vão para stderr. As respostas são escritas num stdout reservado capturado no início da sessão.
+
+### Ferramentas expostas (7, todas `readOnlyHint: true`)
+
+| Tool | Argumentos | Retorna |
+|---|---|---|
+| `search_code` | `query` (obrigatório), `limit?` (1..50, default 10), `project?`, `max_content_chars?` (200..10000, default 1200) | `{Project, File, Language, ChunkType, Symbol, Distance, Content}` (com reranking + compressão de contexto) |
+| `search_business_rules` | `query`, `limit?`, `project?` | `{Project, Title, Description, SourceFile, Symbol, Status, Evidence, Confidence, Distance}` |
+| `search_knowledge` | `query`, `limit?`, `project?` | `{Project, Kind, Title, Content, Source, Symbol, Status, Evidence, Confidence, Distance}` |
+| `find_related_files` | `file?` ou `query?`, `project?`, `limit?` (default 10) | `{Project, File, Distance, MatchedChunks, Symbols}` |
+| `get_symbol_callers` | `symbol` (obrigatório), `project?` | `{Project, Symbol, File, Relation}` |
+| `get_symbol_callees` | `symbol`, `project?` | `{Project, Symbol, File, Relation}` |
+| `get_class_hierarchy` | `className`, `project?` | `{Project, ParentName, Relation}` |
+
+Cada ferramenta declara `annotations.readOnlyHint=true`, `outputSchema` estruturado, ícone SVG embutido e campo `title`. Erros de argumentos viram Tool Execution Errors (`isError: true`); erros de protocolo viram JSON-RPC `-32600`/`-32601`/`-32700`.
+
+A resposta do `initialize` inclui **instructions** recomendando a ordem de uso: `search_code` → `search_business_rules` → `search_knowledge` → `find_related_files` → leitura direta de arquivos só quando insuficiente (preferir `distance < 0.4`).
+
+---
+
+## Configuração de MCP nas IDEs
+
+### Rider
+
+**Settings → Tools → AI Assistant → Model Context Protocol (MCP)**:
 
 ```json
 {
@@ -520,15 +369,21 @@ Em **Settings > Tools > AI Assistant > Model Context Protocol (MCP)**, adicionar
 }
 ```
 
----
+### VS Code / Cursor / Claude Desktop / Antigravity / Codex / opencode
 
-## 7. Configuração MCP no VS Code
+Há um **script único** que registra o servidor em todos os clientes detectados:
 
-Configuração genérica:
+```bash
+./setup-mcp.sh
+```
+
+Ele escreve/merge `{"command":"ai-memory","args":["mcp"]}` em `~/.config/claude/mcp.json`, `~/.config/Antigravity/User/settings.json` (se existir), `~/.cursor/mcp.json` (se `~/.cursor` existir), e apenas avisa sobre `opencode` (que já usa `~/.config/opencode/opencode.jsonc`). **Idempotente** para Claude/Antigravity (merge via Python); sobrescreve para Cursor.
+
+Configuração genérica (coloque no local esperado pela sua extensão/agente):
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "ai-memory": {
       "command": "ai-memory",
       "args": ["mcp"]
@@ -537,67 +392,328 @@ Configuração genérica:
 }
 ```
 
-A localização exata do arquivo depende da extensão/agente usado.
+O projeto já inclui `.opencode/opencode.jsonc` e `.ai/mcp/mcp.json` para uso por opencode e clientes genéricos.
+
+> Para confirmar manualmente que o servidor está respondendo:
+> ```bash
+> printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n' | ai-memory mcp
+> ```
 
 ---
 
-## 8. Instruções para agentes
+## Tray Application (bandeja do sistema)
 
-Os prompts e skills ficam em arquivos separados para facilitar reutilização em outros projetos:
+Aplicação visual complementar na bandeja do sistema, escrita com **Avalonia 11** no .NET 10 (`AiMemory.Tray`, comando `ai-memory-tray`). Monitora se o servidor MCP está sendo consumido ativamente por alguma IDE — **ícone cinza quando ocioso**, **azul ciano brilhante** quando uma IDE estabelece conexão (verificação a cada 4s enumerando processos `ai-memory`/`dotnet` com `mcp` na linha de comando, sem `tray`).
 
-- [Prompt ai-memory MCP first](ai-config-files/ai-memory-mcp-first.md)
-- [Skill: engenharia com memória](ai-config-files//skills/ma9-context-first-response.md)
-- [Skill: refatoração](ai-config-files//skills/ma9-refactor-impact-first.md)
+### Funcionalidades
 
-Copie esses arquivos, ou apenas os arquivos desejados, para os projetos em que o agente deve consultar o `ai-memory` antes de analisar código. Em seguida, cadastre o conteúdo como instrução de projeto, prompt compartilhado ou skill no Rider, VS Code, Codex ou outro agente usado pelo time.
+- **Ícone dinâmico**: cinza (idle) ↔ azul ciano (ativo). Verificado por processo, não por rede.
+- **Menu de contexto**:
+  - `Indexar Workspace` — dispara `ai-memory index` em background e notifica ao concluir (ou captura stderr em falha).
+  - `Testar Banco de Dados` — ping assíncrono no PostgreSQL configurado.
+  - `Gerenciar PostgreSQL` — Iniciar/Parar/Reiniciar serviço (`systemctl`/`brew services`/`net`+UAC) e **Criar Banco e Aplicar Migrações** (bootstrap do `ai_memory` + execução de `sql/*.sql`).
+  - Workspace switcher dinâmico (submenus listando workspaces, marcando o ativo com ✓).
+  - Lista de Projetos do workspace ativo (com contagem de chunks ao lado).
+  - `Sair` — encerra com segurança.
+- **Notificações nativas**: `notify-send` (Linux GNOME/KDE), `osascript` (macOS), balão de bandeja via PowerShell (Windows 11).
 
----
-
-## 9. Realizar primeira indexação
+### Gerenciar a bandeja pela CLI
 
 ```bash
-ai-memory index --semantic
+ai-memory tray                  # abre a bandeja manualmente (precisa AiMemory.Tray instalado)
+ai-memory tray install          # instala AiMemory.Tray + autostart
+ai-memory tray status           # mostra installed/running/autostart path/executable path
+ai-memory tray update           # recria o autostart apontando para o executável atual
+ai-memory tray uninstall        # remove autostart e encerra o processo
+ai-memory tray remove           # alias de uninstall
+ai-memory tray setup            # assistente interativo
 ```
 
----
+### Arquivos criados por plataforma
 
-## 10. Roadmap do projeto
+| Plataforma | Autostart | Outros |
+|---|---|---|
+| **Linux** | `~/.config/autostart/ai-memory-tray.desktop` | `~/.ai-memory/tray.pid` |
+| **macOS** | `~/Library/LaunchAgents/com.aimemory.tray.plist` (logs em `~/Library/Logs/AiMemory`) | `launchctl bootstrap/kickstart` |
+| **Windows** | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ai-memory-tray.lnk` | atalho via WScript Shell |
 
-### MVP atual
-
-- schema PostgreSQL;
-- indexação básica;
-- busca vetorial básica;
-- chunking inicial com Roslyn para C#;
-- extração heurística e semântica opcional de regras e conhecimento;
-- comandos `index`, `search`, `watch` e `mcp`;
-- comandos de bandeja `tray setup`, `tray install`, `tray update`, `tray status`, `tray uninstall` e alias `tray remove`;
-- servidor MCP STDIO funcional;
-- ferramentas MCP `search_code`, `search_business_rules`, `search_knowledge`, `find_related_files`, `get_symbol_callers`, `get_symbol_callees` e `get_class_hierarchy`;
-- pacote NuGet configurado como .NET global tool com README, release notes, versão de assembly alinhada e assets de tray empacotados.
-
-### Próximas melhorias
-
-1. Implementar watcher real com debounce.
-2. Evoluir chunking C# com símbolos, relações e chamadas.
-3. Evoluir extração semântica com deduplicação vetorial e agrupamento de evidências.
-4. Criar tabela de relações entre símbolos.
-5. Criar reranking.
-6. Evoluir dashboard de memória com ações de manutenção.
-7. Criar comandos para limpeza e reindexação por projeto.
+> > A resolução do executável do tray segue: shim da global tool (`~/.dotnet/tools/ai-memory-tray`) → apphost publicado → `dotnet ai-memory.dll`. Isso evita o erro comum de autostart apontar para `dotnet run` ou path temporário interno.
 
 ---
 
-## 11. Observações importantes
+## Configuração
 
-Este projeto não treina o modelo.
+### Arquivo principal: `~/.ai-memory/config.json`
 
-Ele cria uma memória pesquisável:
+Criado em modo `0600` (Unix; dir `0700`). Campos em **camelCase**:
+
+```json
+{
+  "activeWorkspace": "claps",
+  "workspaces": [
+    { "name": "claps", "projects": [ { "name": "gestor", "path": "/path/to/gestor" } ] }
+  ],
+  "database": "ai_memory",
+  "databaseHost": "localhost",
+  "databasePort": 5432,
+  "databaseUser": "postgres",
+  "ollamaBaseUrl": "http://localhost:11434",
+  "embeddingModel": "bge-m3",
+  "semanticModel": "qwen2.5-coder:7b"
+}
+```
+
+A senha **não** é persistida por padrão (preferir env var). Se `database` contiver `=` é tratada como connection string completa (host/port/user/password não são perguntados no setup).
+
+### Padrões de extração: `~/.aimemory/patterns.json`
+
+Permite customizar heurísticas de `rules` e `knowledge` sem recompilar:
+
+```json
+{
+  "rules":    { "contentPatterns": ["bloquead", "cancelad", "vencid", "elegiv", "RuleFor", "AddFailure"] },
+  "knowledge": { "filePathPatterns": ["%.csproj", "%Program.cs", "%Startup.cs"],
+                 "contentPatterns": ["HttpClient", "MassTransit", "MediatR", "EntityFramework", "TODO", "FIXME"] }
+}
+```
+
+Em ausência/erro, usa `PatternsConfig.Default` com as palavras-chave pt-BR já embutidas.
+
+### Variáveis de ambiente (override em relação ao config)
+
+| Variável | Sobrescreve |
+|---|---|
+| `AI_MEMORY_DB` | `database` (ou connection string completa se tiver `=`) |
+| `AI_MEMORY_DB_HOST` | `databaseHost` |
+| `AI_MEMORY_DB_PORT` | `databasePort` |
+| `AI_MEMORY_DB_USER` | `databaseUser` |
+| `AI_MEMORY_DB_PASSWORD` | `databasePassword` (preferida sobre persistir em `config.json`) |
+| `AI_MEMORY_OLLAMA` | `ollamaBaseUrl` |
+| `AI_MEMORY_EMBED_MODEL` | `embeddingModel` |
+| `AI_MEMORY_SEMANTIC_MODEL` | `semanticModel` |
+| `AI_MEMORY_PARALLELISM` | paralelismo padrão |
+
+Se `AI_MEMORY_DB` for uma connection string completa, ela tem prioridade e o setup não pergunta host/porta/usuário/senha separadamente.
+
+---
+
+## Schema do banco (PostgreSQL + pgvector)
+
+Migrações em `sql/`, aplicadas em ordem numérica e rastreadas em `ai_schema_migrations` (nome + SHA256):
+
+- `000_schema.sql` — schema base + extensions `vector`, `pgcrypto`.
+- `010_compat.sql` — migrações compatáveis (timestamps, CHECK constraints de status/stage, índices HNSW, etc.).
+- `020_hybrid_search.sql` — `tsvector` + triggers + GIN para **busca híbrida**.
+
+### Tabelas
+
+| Tabela | Para que serve |
+|---|---|
+| `ai_workspaces` | Grupos de projetos (recorte de trabalho/cliente/produto). |
+| `ai_projects` | Projetos indexados (id `integer`, identificado por `root_path` único). |
+| `ai_workspace_projects` | Vínculo muitos-para-muitos workspace↔projeto (`ON DELETE CASCADE`). |
+| `ai_chunks` | Pedaços semânticos dos arquivos (classe, método, procedure, seção, config). Guarda `content`, `content_hash`, `embedding VECTOR(1024)`, `file_path`, `symbol_name`, `chunk_type`, `language`, e `search_vector` (tsvector). Único por `(project_id, file_path, content_hash)`. |
+| `ai_business_rules` | Regras de negócio extraídas. `status` ∈ `candidate`/`accepted`/`rejected`. Guarda `evidence`, `symbol_name`, `chunk_id` (FK), `confidence NUMERIC(5,2)`, `embedding`. |
+| `ai_knowledge` | Conhecimento de engenharia. Mesma forma de `ai_business_rules`, com `kind` e `content`. |
+| `ai_extraction_chunk_state` | Estado incremental por `(chunk_id, stage)`. `stage` ∈ `rules`/`knowledge`, `status` ∈ `processed`/`failed`, com `content_hash` e `error` (última falha). |
+| `ai_symbols` | Símbolos Roslyn (`kind` ∈ class/interface/struct/enum/record, `full_name`, `file_path`, linhas). Único por `(project_id, full_name)`. |
+| `ai_symbol_relations` | Arestas do grafo: `relation` ∈ `calls`/`inherits`/`implements`/`uses`/`references`. PK `(source_id, target_id, relation)`. |
+
+### Regras de estado (importante)
+
+- Regras/conhecimento sem **evidência** copiada do chunk devem ser tratados como **hipótese**, não fato consolidado.
+- `candidate` é descoberta ainda não revisada; `accepted` é validada; `rejected` é falso positivo ou obsoleta.
+- A tool **nunca** promove automaticamente `candidate → accepted`. Revisão humana é explícita.
+
+---
+
+## Estratégia de chunking
+
+A qualidade do sistema depende mais do chunking do que do banco vetorial. **Regra principal: dividir por significado, não por número fixo de caracteres.**
+
+| Linguagem | Estratégia |
+|---|---|
+| **C#** | **Roslyn** — classe pequena vira 1 chunk `type`; classe grande vira vários chunks por membro (método/propriedade) com prefixo de `usings`/`namespace`/declaração de tipo. Fallback textual se não houver tipos reconhecíveis. `symbol_name` = `Namespace.Class.Method(params)`. |
+| **SQL** | Divide por `GO`, identifica `create/alter procedure|view|function|trigger`. |
+| **Markdown** | Divide por `#`/`##`/`### headings`. |
+| **JSON/YAML/config** | Divide por objeto principal ou arquivo inteiro se pequeno. |
+| **.razor/.cshtml** | Chunking nativo (não-genérico). |
+
+**Tamanho máximo sugerido:** ~6.000 caracteres por chunk (`MaxChunkLength`). Antes do embedding, cada chunk recebe um **prefixo de contexto** (`[CONTEXT: Project: X | File: Y | Lang: C# | Symbol: Z]`) via `ContextualChunkingService` — esse prefixo não é gravado no `content` do banco (economiza tokens nas respostas) mas realimenta o embedding para melhorar a namespaces.
+
+Na resposta do MCP, o conteúdo sofre **compressão de contexto** (Netflix-Headroom-style): headers de licença viram `[license header omitted]`, blocos grandes de `using` viram `[usings omitted]`, XML doc tags são truncadas, e métodos não-alvo têm o corpo colapsado em `/* body omitted */`.
+
+---
+
+## State e serviços (resumo técnico)
+
+### Serviços principais (`Services/`)
+
+| Serviço | O que faz |
+|---|---|
+| `OllamaService` | Embeddings (`api/embeddings`/`api/embed`) e geração JSON (`api/generate`). Retry **Polly** (3 tentativas, backoff exponencial + jitter). Batch embedding com fallback por chunk. |
+| `PgVectorService` | Fachada sobre 6 repositórios. `UpsertChunkAsync`, `SearchAsync`, `FindRelatedFilesAsync`, `GetChunksForRuleExtractionAsync`, `UpsertBusinessRuleCandidateAsync`, símbolos, etc. |
+| `ChunkRepository` / `RuleRepository` / `KnowledgeRepository` / `SymbolGraphRepository` / `ExtractionStateRepository` / `SearchService` | Um repositório por agregado. RRF híbrido via CTEs. Orphan cleanup. Upsert idempotente. |
+| `ChunkingService` | Enumeração de arquivos (prefere `git ls-files`), chunking por linguagem, detecção de migrations EF e testes. |
+| `ContextualChunkingService` | Prefixo `[CONTEXT: ...]` para embeddings. |
+| `ContextCompressionService` | Compressão de código/evidência nas respostas MCP. |
+| `RuleExtractionService` / `KnowledgeExtractionService` | Extração heurística (regex + palavras-chave) e semântica (prompt JSON) com validação de evidência. |
+| `TextNormalizationService` | Normalização de frases, regex de exceções/validações/ErrosContext, tabela de KnowledgePatterns, detectores pt-BR. |
+| `RerankerService` | Reranking heurístico pós-busca (boost por símbolo, penalty para config/docs em queries estruturais). |
+| `SymbolGraphService` | Parser Roslyn para grafo de símbolos (classes, interfaces, herança, chamadas). |
+| `SqlPredicates` | Biblioteca de predicados SQL (candidatos, exclusões EF/teste, gate semântico). |
+| `TraySetupService` | Instalação/remoção/status do autostart por plataforma; resolve shim do tray. |
+| `ConfigService` (em `Configuration/`) | Carrega/salva `~/.ai-memory/config.json` (0600), normaliza workspaces/projetos, resolve overrides env. |
+| `HashService` | SHA-256 (usado para `content_hash` incremental). |
+
+### Cache de embeddings (MCP)
+
+O servidor MCP mantém um `MemoryCache` (LRU, **1000 entradas**, TTL **1 hora**) para evitar re-embedar a mesma query/Symbol repetidamente dentro de uma sessão.
+
+---
+
+## Testes
+
+```bash
+dotnet test ai-memory.slnx
+# ou apenas os testes de unidade (sem Docker):
+dotnet test tests/AiMemory.Tests/AiMemory.Tests.csproj --filter "FullyQualifiedName~Unit"
+```
+
+- **Framework:** xUnit 2.9.2 + FluentAssertions 6.12.1.
+- **Integração:** Testcontainers.PostgreSql com a imagem `pgvector/pgvector:pg17` (Docker necessário).
+- **Cobertura atual:** 36 unit `[Fact]` + 5 integration = **41 testes**.
+- Unit cobrem: `TextNormalizationService`, `ChunkingService` (C#/SQL/Markdown/fallback/EF/teste), `ContextCompressionService`, `ContextualChunkingService`, `HashService`, `RerankerService`.
+- Integração cobre: upsert+search com embeddings, stats de `rules`, orphan cleanup, idempotência das migrações.
+
+---
+
+## CI/CD (GitHub Actions)
+
+- **`.github/workflows/ci.yml`** — em `pull_request` e `push` para `main`: matrix **ubuntu/macos/windows**, `dotnet restore/build/test --logger trx` e publicação de relatório via `dorny/test-reporter`.
+- **`.github/workflows/release.yml`** — em tags `v*`: extrai a versão da tag, `dotnet pack -p:Version=...`, `dotnet nuget push` (NuGet.org, precisa de `NUGET_API_KEY` em Secrets) e GitHub Release com `body_path: CHANGELOG.md`.
+
+---
+
+## Instruções para agentes, skills e workflows
+
+Os prompts, skills e workflows ficam em `ai-config-files/` para reaproveitar em outros projetos e clientes de IA:
+
+- [ai-memory MCP first](ai-config-files/ai-memory-mcp-first.md) — prompt de sistema forçando o agente a **consultar o `ai-memory` antes de responder** sobre código/regras/refatoração/bugs. Define tags `[Certain]`/`[Likely]`/`[Guessing]` e expressões proibidas ("Great question", "You're absolutely right"...).
+- [Skill: context-first response](ai-config-files/skills/ma9-context-first-response.md) — fluxo de 5 passos: ai-memory → código → regras → arquitetura → resposta.
+- [Skill: refactor impact-first](ai-config-files/skills/ma9-refactor-impact-first.md) — propostas de refator ancoradas no código existente.
+- [Pack: .NET 10 Migration Skills](ai-config-files/skills/dotnet10/) — 20 skills especializadas + 1 skill mestre para migração corporativa .NET 10.
+- [Workflows: .NET 10](ai-config-files/workflows/dotnet10/) — templates/checklists para onda de migração, PR review, CI, cobertura, benchmark e release.
+
+### Pack .NET 10
+
+O pack `.NET 10` foi criado para padronizar migrações corporativas e evitar que cada sistema avance por um caminho diferente. Ele cobre:
+
+| Área | Skills principais |
+|---|---|
+| Planejamento | `dotnet10-migration-master-plan`, `dotnet10-upgrade-assessment`, `dotnet10-breaking-changes-review` |
+| Padronização | `dotnet10-project-file-modernization`, `dotnet10-code-style-analyzers`, `dotnet10-dependency-modernization` |
+| Modernização | `csharp14-modernization`, `aspnetcore10-modernization`, `efcore10-modernization` |
+| Testes | `dotnet10-testing-xunit-mtp`, `aspnetcore-integration-tests` |
+| Performance | `dotnet10-performance-hot-paths`, `dotnet10-benchmarking` |
+| Produção | `dotnet10-observability`, `dotnet10-security-review`, `dotnet10-containerization`, `dotnet10-release-workflow` |
+| Arquitetura | `dotnet10-api-contracts-openapi`, `dotnet10-nativeaot-trimming-readiness`, `dotnet10-legacy-system-strangler-plan` |
+
+Essas skills são prompts internos originais, alinhados a documentação Microsoft/.NET e práticas consolidadas do ecossistema. Elas não são cópias de prompts aleatórios de repositórios públicos.
+
+### Instalar skills/workflows
+
+O pack é empacotado junto com a tool porque `ai-config-files/**/*` é copiado para o output e incluído no pacote NuGet. A instalação pode acontecer de duas formas.
+
+Pelo setup:
+
+```bash
+ai-memory setup
+```
+
+Ao final, o setup pergunta:
+
+```text
+Install AI Memory .NET 10 skills/workflows now? [Y/n]
+```
+
+Pelo comando manual:
+
+```bash
+ai-memory skills list          # lista tudo que vem no pacote
+ai-memory skills detect        # mostra IDEs/CLIs/projetos detectados
+ai-memory skills install       # pergunta onde instalar
+ai-memory skills install --all # instala em todos os alvos detectados
+```
+
+Alvos típicos:
+
+| Alvo | Caminho esperado |
+|---|---|
+| Perfil local do AI Memory | `~/.ai-memory/agent-packs/dotnet10` |
+| Projeto configurado | `<project>/.ai/agent-packs/dotnet10` |
+| Codex | `~/.codex/skills/ai-memory-dotnet10` |
+| Claude | `~/.claude/skills/ai-memory-dotnet10` |
+| opencode | `~/.config/opencode/skills/ai-memory-dotnet10` |
+| Cursor | `~/.cursor/ai-memory/dotnet10` |
+| VS Code | `<VS Code User>/ai-memory/dotnet10` |
+| Roo Code por projeto | `<project>/.roo/ai-memory/dotnet10` quando `.roo`/`.roomodes` existir |
+
+> Nem toda IDE/CLI tem auto-discovery nativo e estável para skills. Quando o cliente não descobrir automaticamente, use o diretório instalado como fonte para instrução de projeto, prompt compartilhado, regra do agente ou skill manual.
+
+### Workflow recomendado para migração .NET 10
+
+1. Rodar `ai-memory setup` e instalar o pack de skills.
+2. Indexar o workspace com `ai-memory index`.
+3. Conectar a IDE/CLI via MCP com `ai-memory mcp`.
+4. Usar `dotnet10-migration-master-plan` para planejar as ondas.
+5. Usar `dotnet10-upgrade-assessment` antes de alterar `TargetFramework`.
+6. Usar `dotnet10-ci-quality-gates` para garantir build/testes/quality gates.
+7. Usar `dotnet10-pr-review-checklist` em todo PR de migração.
+8. Usar skills específicas quando aparecerem riscos de EF Core, ASP.NET Core, performance, segurança, OpenAPI ou release.
+
+---
+
+## O que esperar / limitações
+
+- **Não treina o modelo.** O `ai-memory` cria e mantém uma **memória pesquisável** (embeddings + indexação + extração); o raciocínio continua sendo do LLM externo (Ollama ou da IDE).
+- **Foco .NET.** Roslyn é explorado para C#; outras linguagens usam chunking textual/regex. Suporte a TypeScript/Python/Java está fora do escopo desta fase.
+- **Latência de embedding** (~60–230ms por query no Ollama local) é aceitável; otimizações agressivas (ONNX embutido, HNSW tunado, cache persistido em SQLite) foram **propositadamente adiadas** (ver ADR-003 em `planning/06-technical/`).
+- **STDIO-only** para MCP. Não há transporte HTTP nesta fase (também fora do escopo por ADR).
+- **Revisão humana obrigatória** para `accepted`/`rejected` em regras e conhecimento. O sistema não decide sozinho o que é fato.
+- **Dependências externas**: PostgreSQL 14+ com pgvector, Ollama com `bge-m3` (1024 dims). Se algum mudar formato/dimensão, será breaking change de schema.
+- **Skills são arquivos auxiliares.** A instalação copia prompts/workflows para alvos locais, mas cada IDE/CLI pode exigir configuração manual para consumi-los.
+
+---
+
+## Roadmap
+
+Resumo de marcos (detalhes em `planning/`):
+
+| Versão | Foco | Status |
+|---|---|---|
+| **v0.2.0** | Estabilização: build, FK cascade, migrations determinísticas, MaxChunkLength unificado, MCP stdout guardado, testes, split de `PgVectorService`, batch embedding, paralelismo, Polly, watcher real, cache LRU, heurísticas configuráveis, CI/CD | released |
+| **v0.2.4** | Hotfix: correção do timeout do MCP (respostas JSON-RPC escritas em stdout capturado antes do redirect), `setup-mcp.sh`, configs `.opencode` e `.ai/mcp`, tray asset paths, alinhamento de versão entre `AiMemory.Tool` e `AiMemory.Tray` | **current** |
+| **v0.3.0** | Performance: batch `/api/embed` com fallback, paralelismo de `rules`/`knowledge`, retry Polly v8 | planejada |
+| **v0.4.0** | MCP `2025-11-25` (Tool Annotations, Structured Output, ícones, Tool Execution Errors, `title`) + **split do tray** em pacote próprio | em curso (tray já separado como `AiMemory.Tray`) |
+| **v0.5.0** | Maturidade: CI/CD, watcher real, `patterns.json`, cache LRU+TTL, `skills` installer e pack .NET 10 | partes já entregues |
+| **v0.6.0+** | MCP `2026-07-28` (stateless, `server/discover`, `subscriptions/listen`) — aguardando stable + ≥2 clients | futuro |
+
+Próximas melhorias planejadas (backlog): watcher com debounce robusto, evolução do chunking C# com símbolos/relações/chamadas, extração semântica com deduplicação vetorial e agrupamento de evidências, tabela de relações entre símbolos, reranking, dashboard com ações de manutenção, comandos de limpeza/reindexação por projeto.
+
+---
+
+## Observações finais
+
+Este projeto não treina o modelo. Ele cria uma **memória pesquisável**:
 
 ```text
 modelo LLM = raciocina
-bge-m3 = transforma texto em vetor
-pgvector = encontra contexto parecido
-ai-memory = mantém tudo atualizado
-MCP = conecta essa memória ao agente
+bge-m3     = transforma texto em vetor
+pgvector   = encontra contexto parecido
+Roslyn     = entende a estrutura do C#
+ai-memory  = mantém tudo atualizado
+MCP        = conecta essa memória ao agente
 ```
+
+Tudo **local**, auditável e sob seu controle — ideal para times .NET que usam IA nas IDEs sem querer vazar código-fonte nem queimar orçamento de tokens.

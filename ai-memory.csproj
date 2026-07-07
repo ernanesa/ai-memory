@@ -9,7 +9,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>ai-memory</ToolCommandName>
     <PackageId>AiMemory.Tool</PackageId>
-    <Version>0.1.5</Version>
+    <Version>0.2.4</Version>
 
     <!-- NuGet package metadata -->
     <Authors>Engineering Team</Authors>
@@ -28,16 +28,15 @@ Key features:
     <PackageTags>ai;memory;mcp;ollama;pgvector;embeddings;rag;dotnet-tool;engineering;csharp</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReleaseNotes>Tray setup management with install/update/remove/status commands, macOS LaunchAgent hardening, NuGet package metadata, and MCP version alignment.</PackageReleaseNotes>
+    <PackageReleaseNotes>MCP 2025-11-25 upgrade with Tool Annotations, Structured Output, icons, title field, and Tool Execution Errors. Tray split into separate AiMemory.Tray package. Batch Ollama embedding, parallel extraction, Polly retry, real FileSystemWatcher, LRU embedding cache, configurable heuristics, CI/CD pipelines, orphan chunk cleanup, SQL migrations stabilized, and 35 unit tests.</PackageReleaseNotes>
     <Copyright>Copyright © 2024-2026 Engineering Team</Copyright>
     <NeutralLanguage>pt-BR</NeutralLanguage>
-    <AssemblyVersion>0.1.5.0</AssemblyVersion>
-    <FileVersion>0.1.5.0</FileVersion>
-    <InformationalVersion>0.1.5</InformationalVersion>
+    <AssemblyVersion>0.2.4.0</AssemblyVersion>
+    <FileVersion>0.2.4.0</FileVersion>
+    <InformationalVersion>0.2.4</InformationalVersion>
 
-    <!-- Build settings -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);AiMemory.Tray/**</DefaultItemExcludes>
-  </PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Tray/**;tests/**</DefaultItemExcludes>
+    </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Npgsql" Version="9.0.3" />
@@ -46,26 +45,13 @@ Key features:
     <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
-    <PackageReference Include="Avalonia" Version="11.0.10" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.0.10" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.10" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.0.10" />
-    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <AvaloniaResource Include="Tray/Assets/**" />
+    <PackageReference Include="Polly" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <None Include="sql/*.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="ai-config-files/**/*" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="ai-config-files/" />
     <None Include="README.md" Pack="true" PackagePath="\" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Compile Remove="AiMemory.Tray/**" />
-    <Content Remove="AiMemory.Tray/**" />
-    <EmbeddedResource Remove="AiMemory.Tray/**" />
-    <None Remove="AiMemory.Tray/**" />
   </ItemGroup>
 </Project>

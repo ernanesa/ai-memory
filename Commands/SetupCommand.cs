@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json.Serialization;
 using AiMemory.Configuration;
+using AiMemory.Services;
 using Npgsql;
 
 namespace AiMemory.Commands
@@ -474,14 +475,14 @@ namespace AiMemory.Commands
                         {
                             markCmd.Transaction = tx;
                             markCmd.CommandText = """
-                                INSERT INTO ai_schema_migrations(name, checksum)
+                                INSERT INTO ai_schema_migrations(name, content_hash)
                                 VALUES ($1, $2)
                                 ON CONFLICT(name) DO UPDATE
-                                SET checksum = EXCLUDED.checksum,
+                                SET content_hash = EXCLUDED.content_hash,
                                     applied_at = NOW();
                                 """;
                             markCmd.Parameters.AddWithValue(migrationName);
-                            markCmd.Parameters.AddWithValue(HashSchema(schema));
+                            markCmd.Parameters.AddWithValue(HashService.Sha256(schema));
                             await markCmd.ExecuteNonQueryAsync();
                         }
 
@@ -521,11 +522,24 @@ namespace AiMemory.Commands
             cmd.CommandText = """
                 CREATE TABLE IF NOT EXISTS ai_schema_migrations (
                     name TEXT PRIMARY KEY,
-                    checksum TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
                     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 """;
             await cmd.ExecuteNonQueryAsync();
+            await using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'ai_schema_migrations' AND column_name = 'content_hash'
+                    ) THEN
+                        ALTER TABLE ai_schema_migrations ADD COLUMN content_hash TEXT;
+                    END IF;
+                END $$;
+                """;
+            await alterCmd.ExecuteNonQueryAsync();
         }
 
         private static async Task<bool> IsSchemaMigrationAppliedAsync(NpgsqlConnection conn, string migrationName)
@@ -534,12 +548,6 @@ namespace AiMemory.Commands
             cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM ai_schema_migrations WHERE name = $1);";
             cmd.Parameters.AddWithValue(migrationName);
             return (bool)(await cmd.ExecuteScalarAsync() ?? false);
-        }
-
-        private static string HashSchema(string schema)
-        {
-            var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(schema));
-            return Convert.ToHexString(bytes).ToLowerInvariant();
         }
 
         private static async Task<SetupStepResult> PullModelIfNeededAsync(string ollamaBaseUrl, string model)

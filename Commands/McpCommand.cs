@@ -2,12 +2,13 @@ using System.Text.Json;
 using System.Reflection;
 using AiMemory.Configuration;
 using AiMemory.Services;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace AiMemory.Commands
 {
     public static class McpCommand
     {
-        private const string ProtocolVersion = "2024-11-05";
+        private const string ProtocolVersion = "2025-11-25";
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -30,8 +31,12 @@ namespace AiMemory.Commands
         {
             private readonly OllamaService _ollama = new(ollamaBaseUrl, embeddingModel);
             private readonly PgVectorService _pg = new(connectionString);
-            private readonly Dictionary<string, float[]> _embeddingCache = new(StringComparer.Ordinal);
-            private readonly object _embeddingCacheLock = new();
+            private readonly MemoryCache _embeddingCache = new(new MemoryCacheOptions
+            {
+                SizeLimit = 1000,
+                ExpirationScanFrequency = TimeSpan.FromMinutes(5)
+            });
+            private TextWriter _stdout = Console.Out;
 
             public async ValueTask DisposeAsync()
             {
@@ -42,20 +47,30 @@ namespace AiMemory.Commands
             {
                 Console.Error.WriteLine("AI Memory MCP server started over stdio.");
 
-                while (!ct.IsCancellationRequested)
+                _stdout = Console.Out;
+                var originalOut = Console.Out;
+                Console.SetOut(TextWriter.Null);
+                try
                 {
-                    var line = await Console.In.ReadLineAsync(ct);
-                    if (line is null)
+                    while (!ct.IsCancellationRequested)
                     {
-                        break;
-                    }
+                        var line = await Console.In.ReadLineAsync(ct);
+                        if (line is null)
+                        {
+                            break;
+                        }
 
-                    if (string.IsNullOrWhiteSpace(line))
-                    {
-                        continue;
-                    }
+                        if (string.IsNullOrWhiteSpace(line))
+                        {
+                            continue;
+                        }
 
-                    await HandleMessageAsync(line, ct);
+                        await HandleMessageAsync(line, ct);
+                    }
+                }
+                finally
+                {
+                    Console.SetOut(originalOut);
                 }
             }
 
@@ -123,7 +138,7 @@ namespace AiMemory.Commands
                     }
                     catch (ArgumentException ex)
                     {
-                        await WriteToolErrorAsync(id, ex.Message, ct);
+                        await WriteResultAsync(id, new { content = new[] { new { type = "text", text = ex.Message } }, isError = true }, ct);
                     }
                     catch (Exception ex)
                     {
@@ -327,35 +342,41 @@ namespace AiMemory.Commands
             private async Task<float[]> EmbedCachedAsync(string text, CancellationToken ct)
             {
                 var key = $"{embeddingModel}\n{text}";
-                lock (_embeddingCacheLock)
+                if (_embeddingCache.TryGetValue(key, out float[]? cached) && cached is not null)
                 {
-                    if (_embeddingCache.TryGetValue(key, out var cached))
-                    {
-                        return cached;
-                    }
+                    return cached;
                 }
 
                 var embedding = await _ollama.EmbedAsync(text, ct);
-                lock (_embeddingCacheLock)
+                _embeddingCache.Set(key, embedding, new MemoryCacheEntryOptions
                 {
-                    if (_embeddingCache.Count >= 128)
-                    {
-                        _embeddingCache.Remove(_embeddingCache.Keys.First());
-                    }
-
-                    _embeddingCache[key] = embedding;
-                }
-
+                    Size = 1,
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1)
+                });
                 return embedding;
             }
 
             private static object[] CreateTools()
             {
+                const string iconSrc = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iMiI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48L3N2Zz4=";
+
+                object outputSchema = new
+                {
+                    type = "object",
+                    properties = new Dictionary<string, object>
+                    {
+                        ["results"] = new { type = "array" }
+                    }
+                };
+
+                object[] icons = [new { src = iconSrc }];
+
                 return
                 [
                     new
                     {
                         name = "search_code",
+                        title = "Search Code",
                         description = "Search indexed code, docs and config. Call this BEFORE reading repository files. Returns ranked chunks with distance scores. Use specific symbols, error messages, or domain terms for best results.",
                         inputSchema = new
                         {
@@ -368,11 +389,15 @@ namespace AiMemory.Commands
                                 ["max_content_chars"] = new { type = "integer", description = "Maximum characters returned per chunk.", minimum = 200, maximum = 10000, @default = 1200 }
                             },
                             required = new[] { "query" }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     },
                     new
                     {
                         name = "search_business_rules",
+                        title = "Search Business Rules",
                         description = "Search domain rules, validations and constraints extracted from code. Call when the question involves business logic, permissions, statuses, or workflows. Returns rules with evidence and confidence scores.",
                         inputSchema = new
                         {
@@ -384,11 +409,15 @@ namespace AiMemory.Commands
                                 ["project"] = new { type = "string", description = "Optional project filter. Accepts exact project name or workspace/project." }
                             },
                             required = new[] { "query" }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     },
                     new
                     {
                         name = "find_related_files",
+                        title = "Find Related Files",
                         description = "Discover files semantically connected to a concept or file. Call to understand impact radius before refactoring. Accepts a file path or semantic query as input.",
                         inputSchema = new
                         {
@@ -400,11 +429,15 @@ namespace AiMemory.Commands
                                 ["limit"] = new { type = "integer", description = "Maximum number of files to return.", minimum = 1, maximum = 50, @default = 10 },
                                 ["project"] = new { type = "string", description = "Optional project filter. Accepts exact project name or workspace/project." }
                             }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     },
                     new
                     {
                         name = "search_knowledge",
+                        title = "Search Knowledge",
                         description = "Search engineering knowledge: architectural decisions, integration patterns, technical risks, configurations and conventions extracted from code. Call when the question involves architecture, infrastructure, dependencies, messaging, authentication or technical patterns.",
                         inputSchema = new
                         {
@@ -416,11 +449,15 @@ namespace AiMemory.Commands
                                 ["project"] = new { type = "string", description = "Optional project filter. Accepts exact project name or workspace/project." }
                             },
                             required = new[] { "query" }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     },
                     new
                     {
                         name = "get_symbol_callers",
+                        title = "Get Symbol Callers",
                         description = "Find C# callers of a specific symbol in the code graph (e.g. what methods call MyMethod).",
                         inputSchema = new
                         {
@@ -431,11 +468,15 @@ namespace AiMemory.Commands
                                 ["project"] = new { type = "string", description = "Optional project filter." }
                             },
                             required = new[] { "symbol" }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     },
                     new
                     {
                         name = "get_symbol_callees",
+                        title = "Get Symbol Callees",
                         description = "Find C# callees of a specific symbol in the code graph (e.g. what methods MyMethod calls).",
                         inputSchema = new
                         {
@@ -446,11 +487,15 @@ namespace AiMemory.Commands
                                 ["project"] = new { type = "string", description = "Optional project filter." }
                             },
                             required = new[] { "symbol" }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     },
                     new
                     {
                         name = "get_class_hierarchy",
+                        title = "Get Class Hierarchy",
                         description = "Get C# class inheritance or interface implementations (e.g. parent classes or interfaces of MyClass).",
                         inputSchema = new
                         {
@@ -461,7 +506,10 @@ namespace AiMemory.Commands
                                 ["project"] = new { type = "string", description = "Optional project filter." }
                             },
                             required = new[] { "className" }
-                        }
+                        },
+                        annotations = new { readOnlyHint = true },
+                        outputSchema,
+                        icons
                     }
                 ];
             }
@@ -477,16 +525,17 @@ namespace AiMemory.Commands
                             type = "text",
                             text = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonOptions) { WriteIndented = true })
                         }
-                    }
+                    },
+                    structuredContent = payload
                 };
             }
 
-            private static async Task WriteResultAsync(JsonElement? id, object result, CancellationToken ct)
+            private async Task WriteResultAsync(JsonElement? id, object result, CancellationToken ct)
             {
                 await WriteMessageAsync(new { jsonrpc = "2.0", id, result }, ct);
             }
 
-            private static async Task WriteToolErrorAsync(JsonElement? id, string message, CancellationToken ct)
+            private async Task WriteToolErrorAsync(JsonElement? id, string message, CancellationToken ct)
             {
                 await WriteResultAsync(id, new
                 {
@@ -502,7 +551,7 @@ namespace AiMemory.Commands
                 }, ct);
             }
 
-            private static async Task WriteErrorAsync(JsonElement? id, int code, string message, CancellationToken ct)
+            private async Task WriteErrorAsync(JsonElement? id, int code, string message, CancellationToken ct)
             {
                 await WriteMessageAsync(new
                 {
@@ -516,11 +565,11 @@ namespace AiMemory.Commands
                 }, ct);
             }
 
-            private static async Task WriteMessageAsync(object message, CancellationToken ct)
+            private async Task WriteMessageAsync(object message, CancellationToken ct)
             {
                 var json = JsonSerializer.Serialize(message, JsonOptions);
-                await Console.Out.WriteLineAsync(json.AsMemory(), ct);
-                await Console.Out.FlushAsync(ct);
+                await _stdout.WriteLineAsync(json.AsMemory(), ct);
+                await _stdout.FlushAsync(ct);
             }
 
             private static string GetRequiredString(JsonElement arguments, string name)

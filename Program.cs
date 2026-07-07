@@ -1,9 +1,8 @@
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using AiMemory.Commands;
-using Avalonia;
 
-var root = new RootCommand("AI Memory Tool - local engineering memory with Ollama + PostgreSQL/pgvector. Install/update/remove the NuGet tool with dotnet tool; manage tray autostart with ai-memory tray setup/install/update/remove.");
+var root = new RootCommand("AI Memory Tool - local engineering memory with Ollama + PostgreSQL/pgvector.");
 
 var dbOption = new Option<string?>("--db", "PostgreSQL database name or connection string override");
 var ollamaOption = new Option<string?>("--ollama", "Ollama base URL override");
@@ -80,48 +79,55 @@ doctor.SetHandler(async (InvocationContext context) =>
 });
 
 var setup = new Command("setup", "Interactive first-time configuration wizard");
-setup.SetHandler(async () => await SetupCommand.RunAsync());
+setup.SetHandler(async () =>
+{
+    await SetupCommand.RunAsync();
+    Console.WriteLine();
+    Console.Write("Install AI Memory .NET 10 skills/workflows now? [Y/n]: ");
+    var answer = (Console.ReadLine() ?? "").Trim();
+    var accepted = string.IsNullOrWhiteSpace(answer)
+                   || answer.StartsWith("y", StringComparison.OrdinalIgnoreCase);
+    if (accepted)
+    {
+        await SkillsCommand.InstallInteractiveAsync();
+    }
+    else
+    {
+        Console.WriteLine("Skills installation skipped. Run 'ai-memory skills install' later.");
+    }
+});
 
 var project = new Command("project", "Manage configured projects");
-
 var projectAdd = new Command("add", "Add a project to configuration");
 projectAdd.AddOption(workspaceOption);
 projectAdd.SetHandler(async (workspace) => await ProjectCommand.AddAsync(workspace), workspaceOption);
-
 var projectList = new Command("list", "List configured projects");
 projectList.AddOption(workspaceOption);
 projectList.SetHandler(async (workspace) => await ProjectCommand.ListAsync(workspace), workspaceOption);
-
 var projectRemove = new Command("remove", "Remove a configured project");
 var projectNameArg = new Argument<string>("name", "Project name");
 projectRemove.AddArgument(projectNameArg);
 projectRemove.AddOption(workspaceOption);
 projectRemove.SetHandler(async (name, workspace) => await ProjectCommand.RemoveAsync(name, workspace), projectNameArg, workspaceOption);
-
 project.AddCommand(projectAdd);
 project.AddCommand(projectList);
 project.AddCommand(projectRemove);
 
 var workspace = new Command("workspace", "Manage workspaces");
-
 var workspaceAdd = new Command("add", "Create a workspace and make it active");
 var workspaceNameArg = new Argument<string>("name", "Workspace name");
 workspaceAdd.AddArgument(workspaceNameArg);
 workspaceAdd.SetHandler(async (name) => await WorkspaceCommand.AddAsync(name), workspaceNameArg);
-
 var workspaceList = new Command("list", "List workspaces");
 workspaceList.SetHandler(async () => await WorkspaceCommand.ListAsync());
-
 var workspaceUse = new Command("use", "Select the active workspace");
 var workspaceUseNameArg = new Argument<string>("name", "Workspace name");
 workspaceUse.AddArgument(workspaceUseNameArg);
 workspaceUse.SetHandler(async (name) => await WorkspaceCommand.UseAsync(name), workspaceUseNameArg);
-
 var workspaceRemove = new Command("remove", "Remove a workspace");
 var workspaceRemoveNameArg = new Argument<string>("name", "Workspace name");
 workspaceRemove.AddArgument(workspaceRemoveNameArg);
 workspaceRemove.SetHandler(async (name) => await WorkspaceCommand.RemoveAsync(name), workspaceRemoveNameArg);
-
 workspace.AddCommand(workspaceAdd);
 workspace.AddCommand(workspaceList);
 workspace.AddCommand(workspaceUse);
@@ -138,7 +144,6 @@ dashboard.AddOption(workspaceOption);
 dashboard.AddOption(projectFilterOption);
 dashboard.AddOption(dbOption);
 dashboard.SetHandler(async (workspace, project, db) => await DashboardCommand.RunAsync(workspace, project, db), workspaceOption, projectFilterOption, dbOption);
-
 var dashboardServe = new Command("serve", "Start local web dashboard");
 dashboardServe.AddOption(workspaceOption);
 dashboardServe.AddOption(projectFilterOption);
@@ -147,40 +152,35 @@ dashboardServe.AddOption(portOption);
 dashboardServe.SetHandler(async (workspace, project, db, port) => await DashboardCommand.ServeAsync(workspace, project, db, port), workspaceOption, projectFilterOption, dbOption, portOption);
 dashboard.AddCommand(dashboardServe);
 
-root.AddCommand(index);
-root.AddCommand(search);
-root.AddCommand(watch);
-root.AddCommand(doctor);
-root.AddCommand(setup);
-var tray = new Command("tray", "Start or manage the system tray monitor application");
+var skills = new Command("skills", "List, detect and install AI Memory skills/workflows");
+var skillsList = new Command("list", "List bundled skills and workflows");
+skillsList.SetHandler(async () => await SkillsCommand.ListAsync());
+var skillsDetect = new Command("detect", "Detect IDE/CLI install targets");
+skillsDetect.SetHandler(async () => await SkillsCommand.DetectAsync());
+var skillsInstall = new Command("install", "Install bundled skills and workflows");
+var skillsAllOption = new Option<bool>("--all", "Install in all detected targets without prompting");
+skillsInstall.AddOption(skillsAllOption);
+skillsInstall.SetHandler(async (all) => await SkillsCommand.InstallAsync(all), skillsAllOption);
+skills.AddCommand(skillsList);
+skills.AddCommand(skillsDetect);
+skills.AddCommand(skillsInstall);
 
+var tray = new Command("tray", "Start or manage the system tray monitor application");
 var trayInstall = new Command("install", "Install the tray autostart entry and start the tray when supported");
 trayInstall.SetHandler(async (InvocationContext context) =>
 {
-    Console.WriteLine("Installing system tray application...");
     var success = await AiMemory.Services.TraySetupService.InstallAsync();
-    if (success) Console.WriteLine("System tray application installed successfully.");
-    else
-    {
-        Console.WriteLine("Failed to install system tray application.");
-        context.ExitCode = 1;
-    }
+    Console.WriteLine(success ? "System tray application installed successfully." : "Failed to install system tray application.");
+    if (!success) context.ExitCode = 1;
 });
-
 var trayUninstall = new Command("uninstall", "Remove the tray autostart entry and stop the tray process");
 trayUninstall.AddAlias("remove");
 trayUninstall.SetHandler(async (InvocationContext context) =>
 {
-    Console.WriteLine("Uninstalling system tray application...");
     var success = await AiMemory.Services.TraySetupService.UninstallAsync();
-    if (success) Console.WriteLine("System tray application uninstalled successfully.");
-    else
-    {
-        Console.WriteLine("Failed to uninstall system tray application.");
-        context.ExitCode = 1;
-    }
+    Console.WriteLine(success ? "System tray application uninstalled successfully." : "Failed to uninstall system tray application.");
+    if (!success) context.ExitCode = 1;
 });
-
 var trayStatus = new Command("status", "Show current system tray status");
 trayStatus.SetHandler(async () =>
 {
@@ -190,126 +190,51 @@ trayStatus.SetHandler(async () =>
     Console.WriteLine($"Autostart Path: {status.AutostartPath}");
     Console.WriteLine($"Executable Path: {status.ExecutablePath}");
 });
-
 var trayUpdate = new Command("update", "Recreate tray autostart after a dotnet tool update or path change");
 trayUpdate.SetHandler(async (InvocationContext context) =>
 {
-    Console.WriteLine("Updating system tray application...");
     var removed = await AiMemory.Services.TraySetupService.UninstallAsync();
-    if (!removed)
-    {
-        Console.WriteLine("Failed to remove the previous system tray startup registration.");
-        context.ExitCode = 1;
-        return;
-    }
-
-    var success = await AiMemory.Services.TraySetupService.InstallAsync();
-    if (success) Console.WriteLine("System tray application updated successfully.");
-    else
-    {
-        Console.WriteLine("Failed to update system tray application.");
-        context.ExitCode = 1;
-    }
+    var success = removed && await AiMemory.Services.TraySetupService.InstallAsync();
+    Console.WriteLine(success ? "System tray application updated successfully." : "Failed to update system tray application.");
+    if (!success) context.ExitCode = 1;
 });
-
 var traySetup = new Command("setup", "Interactive wizard to install, update or remove the system tray application");
-traySetup.SetHandler(async (InvocationContext context) =>
+traySetup.SetHandler(async () =>
 {
-    Console.ForegroundColor = ConsoleColor.Cyan;
-    Console.WriteLine("╔════════════════════════════════════════╗");
-    Console.WriteLine("║   AI Memory — System Tray Setup        ║");
-    Console.WriteLine("╚════════════════════════════════════════╝");
-    Console.ResetColor();
-    Console.WriteLine();
-
-    Console.Write("Checking tray status... ");
     var status = await AiMemory.Services.TraySetupService.GetStatusAsync();
-    Console.WriteLine();
-
-    Console.WriteLine($"  Autostart  : {(status.Installed ? $"✓ Installed  →  {status.AutostartPath}" : "✗ Not installed")}");
-    Console.WriteLine($"  Running    : {(status.Running ? "✓ Running" : "✗ Stopped")}");
-    Console.WriteLine($"  Executable : {status.ExecutablePath}");
-    Console.WriteLine();
-
-    if (!status.Installed)
-    {
-        Console.WriteLine("  [1] Install — add to system startup and start now");
-        Console.WriteLine("  [2] Cancel");
-    }
-    else
-    {
-        Console.WriteLine("  [1] Update  — re-link autostart to the current executable");
-        Console.WriteLine("  [2] Remove  — uninstall from startup and stop the tray");
-        Console.WriteLine("  [3] Cancel");
-    }
-
-    Console.Write("\nYour choice: ");
-    var choice = (Console.ReadLine() ?? "").Trim();
-    Console.WriteLine();
-
-    if (!status.Installed && choice == "1")
-    {
-        Console.WriteLine("Installing system tray application...");
-        var ok = await AiMemory.Services.TraySetupService.InstallAsync();
-        Console.ForegroundColor = ok ? ConsoleColor.Green : ConsoleColor.Red;
-        Console.WriteLine(ok ? "✓ Tray installed and started successfully." : "✗ Installation failed. Check logs for details.");
-        Console.ResetColor();
-        if (!ok) context.ExitCode = 1;
-    }
-    else if (status.Installed && choice == "1")
-    {
-        Console.WriteLine("Updating system tray application...");
-        var removed = await AiMemory.Services.TraySetupService.UninstallAsync();
-        var ok = removed && await AiMemory.Services.TraySetupService.InstallAsync();
-        Console.ForegroundColor = ok ? ConsoleColor.Green : ConsoleColor.Red;
-        Console.WriteLine(ok ? "✓ Tray updated successfully." : "✗ Update failed. Check logs for details.");
-        Console.ResetColor();
-        if (!ok) context.ExitCode = 1;
-    }
-    else if (status.Installed && choice == "2")
-    {
-        Console.WriteLine("Removing system tray application...");
-        var ok = await AiMemory.Services.TraySetupService.UninstallAsync();
-        Console.ForegroundColor = ok ? ConsoleColor.Green : ConsoleColor.Red;
-        Console.WriteLine(ok ? "✓ Tray removed from startup." : "✗ Removal failed. Check logs for details.");
-        Console.ResetColor();
-        if (!ok) context.ExitCode = 1;
-    }
-    else
-    {
-        Console.WriteLine("Cancelled.");
-    }
+    Console.WriteLine($"Tray Installed: {status.Installed}");
+    Console.WriteLine($"Tray Running: {status.Running}");
+    Console.WriteLine($"Autostart Path: {status.AutostartPath}");
+    Console.WriteLine($"Executable Path: {status.ExecutablePath}");
+    Console.WriteLine(status.Installed ? "Run 'ai-memory tray update' or 'ai-memory tray remove'." : "Run 'ai-memory tray install'.");
 });
-
 tray.AddCommand(trayInstall);
 tray.AddCommand(trayUninstall);
 tray.AddCommand(trayUpdate);
 tray.AddCommand(trayStatus);
 tray.AddCommand(traySetup);
-
 tray.SetHandler((InvocationContext context) =>
 {
-    try
+    if (AiMemory.Services.TrayLaunchService.TryStart(out var errorMessage))
     {
-        AiMemory.Services.TraySetupService.RegisterCurrentTrayProcess();
-        AppBuilder.Configure<AiMemory.Tray.App>()
-            .UsePlatformDetect()
-            .WithInterFont()
-            .LogToTrace()
-            .StartWithClassicDesktopLifetime(
-                context.ParseResult.Tokens.Select(t => t.Value).ToArray());
+        Console.WriteLine("Tray application started.");
+        return;
     }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"Error starting tray: {ex.Message}");
-        context.ExitCode = 1;
-    }
+
+    Console.Error.WriteLine($"Error starting tray: {errorMessage}. Install with: dotnet tool install -g AiMemory.Tray");
+    context.ExitCode = 1;
 });
 
+root.AddCommand(index);
+root.AddCommand(search);
+root.AddCommand(watch);
+root.AddCommand(doctor);
+root.AddCommand(setup);
 root.AddCommand(workspace);
 root.AddCommand(project);
 root.AddCommand(mcp);
 root.AddCommand(dashboard);
+root.AddCommand(skills);
 root.AddCommand(tray);
 
 return await root.InvokeAsync(args);
